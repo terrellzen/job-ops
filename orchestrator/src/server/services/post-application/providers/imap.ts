@@ -10,6 +10,7 @@ import { withImapConnection } from "../ingestion/imap-client";
 import { runImapSync, withImapAccountLock } from "../ingestion/imap-sync";
 import {
   encryptImapCredentials,
+  imapEndpointIdentity,
   parseImapConfig,
   publicImapConfig,
 } from "./imap-credentials";
@@ -88,12 +89,12 @@ export const imapProvider: PostApplicationProviderAdapter = {
           : null;
       const sameEndpoint =
         previousConfig &&
-        previousConfig.host.toLowerCase().replace(/\.$/, "") ===
-          config.host.toLowerCase().replace(/\.$/, "") &&
-        previousConfig.port === config.port &&
-        previousConfig.security === config.security &&
-        previousConfig.username === config.username &&
-        previousConfig.mailbox === config.mailbox;
+        imapEndpointIdentity(previousConfig) === imapEndpointIdentity(config);
+      // Legacy location IDs have no endpoint provenance. Once the endpoint
+      // changes they must never supply decisions for the replacement mailbox.
+      config.legacyNoticePromotionAllowed =
+        Boolean(sameEndpoint) &&
+        previousConfig?.legacyNoticePromotionAllowed !== false;
       if (sameEndpoint && previous?.credentials) {
         config.uidValidity = previous.credentials.uidValidity as
           | string

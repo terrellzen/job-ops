@@ -10,6 +10,7 @@ import {
   createApplicationAttempt,
   getScopedAttempt,
   listApplicationAttempts,
+  setCurrentAttemptClosureEvent,
 } from "@server/repositories/application-attempts";
 import { getJobById, listJobSummariesByIds } from "@server/repositories/jobs";
 import {
@@ -265,6 +266,7 @@ export async function approvePostApplicationInboxItem(args: {
     if (args.newAttempt && transition.toStage === "applied")
       shouldTransition = false;
     if (args.reopen) {
+      setCurrentAttemptClosureEvent(resolvedJobId, null);
       tx.update(schema.jobs)
         .set({ outcome: null, closedAt: null })
         .where(

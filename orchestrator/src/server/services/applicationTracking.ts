@@ -3,6 +3,7 @@ import { trackServerProductEvent } from "@infra/product-analytics";
 import {
   ensureInitialApplicationAttempt,
   getScopedAttempt,
+  setCurrentAttemptClosureEvent,
 } from "@server/repositories/application-attempts";
 import { trackCanonicalActivationEvent } from "@server/services/activation-funnel";
 import type {
@@ -244,6 +245,8 @@ export function transitionStage(
       .set(updates)
       .where(and(jobsScopeFilter(), eq(jobs.id, applicationId)))
       .run();
+    if (updates.closedAt !== undefined)
+      setCurrentAttemptClosureEvent(applicationId, eventId);
 
     return {
       event: {
@@ -308,8 +311,14 @@ export function updateStageEvent(
       .where(and(stageEventsScopeFilter(), eq(stageEvents.id, eventId)))
       .run();
 
-    // Labels/notes alone never request a status or outcome change.
-    if (!toStage && occurredAt === undefined && !hasOutcome) return;
+    // The UI resubmits all fields even when only a label changed. Compare
+    // lifecycle values, rather than treating field presence as a state change.
+    const stageChanged = toStage !== undefined && toStage !== event.toStage;
+    const dateChanged =
+      occurredAt !== undefined && occurredAt !== event.occurredAt;
+    const outcomeChanged =
+      hasOutcome && (outcome ?? null) !== (event.outcome ?? null);
+    if (!stageChanged && !dateChanged && !outcomeChanged) return;
 
     // Historical attempts must never change the current attempt’s job status.
     const currentAttemptId = ensureInitialApplicationAttempt(
@@ -338,10 +347,10 @@ export function updateStageEvent(
       if (!job) throw new Error("Job not found");
 
       if (
-        !hasOutcome &&
         job.closedAt !== null &&
-        !eventOwnsClosure(event, job) &&
-        !isClosingStage(toStage ?? (lastEvent.toStage as ApplicationStage))
+        getScopedAttempt(currentAttemptId)?.closureEventId !== event.id &&
+        !outcomeChanged &&
+        !(stageChanged && toStage === "closed")
       )
         return;
 
@@ -365,6 +374,10 @@ export function updateStageEvent(
         })
         .where(and(jobsScopeFilter(), eq(jobs.id, event.applicationId)))
         .run();
+      setCurrentAttemptClosureEvent(
+        event.applicationId,
+        closedAt !== null ? lastEvent.id : null,
+      );
     }
   });
 }
@@ -399,7 +412,10 @@ export function deleteStageEvent(eventId: string): void {
     if (!currentJob) throw new Error("Job not found");
     // An outcome-only closure belongs to the job, not to this event. Deleting
     // unrelated history must not clear it, even if no stage events remain.
-    if (currentJob.closedAt !== null && !eventOwnsClosure(event, currentJob))
+    if (
+      currentJob.closedAt !== null &&
+      getScopedAttempt(currentAttemptId)?.closureEventId !== event.id
+    )
       return;
     const lastEvent = tx
       .select()
@@ -443,6 +459,10 @@ export function deleteStageEvent(eventId: string): void {
         })
         .where(and(jobsScopeFilter(), eq(jobs.id, event.applicationId)))
         .run();
+      setCurrentAttemptClosureEvent(
+        event.applicationId,
+        closedAt !== null ? lastEvent.id : null,
+      );
     } else {
       // If no events left, maybe revert to discovered?
       // For now just keep it as is or set to discovered if it was applied
@@ -456,6 +476,7 @@ export function deleteStageEvent(eventId: string): void {
         })
         .where(and(jobsScopeFilter(), eq(jobs.id, event.applicationId)))
         .run();
+      setCurrentAttemptClosureEvent(event.applicationId, null);
     }
   });
 }
@@ -600,12 +621,9 @@ function maybeTrackStageAnalytics(
   }
 }
 
-function inferOutcome(
-  toStage: ApplicationStage,
-  metadata: StageEventMetadata | null,
-): JobOutcome | null {
+function inferOutcome(toStage: ApplicationStage): JobOutcome | null {
   if (toStage === "offer") return "offer_accepted";
-  if (toStage === "closed" && metadata?.reasonCode) return "rejected";
+
   return null;
 }
 
@@ -621,7 +639,7 @@ function resolveOutcomeAndClosedAt(input: {
   jobOutcome: JobOutcome | null;
   jobClosedAt: number | null;
 }): { outcome: JobOutcome | null; closedAt: number | null } {
-  const inferredOutcome = inferOutcome(input.lastStage, input.metadata);
+  const inferredOutcome = inferOutcome(input.lastStage);
   const closingStage = isClosingStage(input.lastStage);
   const outcome =
     input.lastEventOutcome ??
@@ -638,20 +656,4 @@ function resolveOutcomeAndClosedAt(input: {
     return { outcome, closedAt: input.lastEventOccurredAt };
   }
   return { outcome, closedAt: input.jobClosedAt };
-}
-
-function eventOwnsClosure(
-  event: typeof stageEvents.$inferSelect,
-  job: typeof jobs.$inferSelect,
-): boolean {
-  if (job.closedAt !== event.occurredAt) return false;
-  const outcome =
-    event.outcome ??
-    inferOutcome(
-      event.toStage as ApplicationStage,
-      parseMetadata(event.metadata),
-    );
-  return event.toStage === "closed"
-    ? outcome === job.outcome
-    : outcome !== null && outcome === job.outcome;
 }

@@ -401,3 +401,22 @@ export function listSiblingApplicationJobs(jobId: string) {
         normalize(other.title) === normalize(job.title),
     );
 }
+
+// Null records an independent outcome/API closure, rather than an inferred
+// association with an event that happens to have the same timestamp.
+export function setCurrentAttemptClosureEvent(
+  jobId: string,
+  eventId: string | null,
+): void {
+  const current = db
+    .select()
+    .from(attempts)
+    .where(and(privateDataScopeFilter(attempts), eq(attempts.jobId, jobId)))
+    .orderBy(desc(attempts.sequence))
+    .get();
+  if (current)
+    db.update(attempts)
+      .set({ closureEventId: eventId })
+      .where(and(privateDataScopeFilter(attempts), eq(attempts.id, current.id)))
+      .run();
+}

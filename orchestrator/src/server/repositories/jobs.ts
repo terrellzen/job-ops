@@ -38,6 +38,7 @@ import {
   getPrivateDataScope,
   privateDataScopeFilter,
 } from "../tenancy/private-scope";
+import { setCurrentAttemptClosureEvent } from "./application-attempts";
 
 const { jobNotes, jobs } = schema;
 
@@ -657,20 +658,24 @@ export async function updateJob(
         ? { appliedAt: sql`coalesce(${jobs.appliedAt}, ${now})` }
         : {};
 
-  await db
-    .update(jobs)
-    .set({
-      ...updateFields,
-      ...(clearsBriefForDescriptionEdit ? { jobBrief: null } : {}),
-      ...(locationEvidence !== undefined
-        ? { locationEvidence: serializeLocationEvidence(locationEvidence) }
-        : {}),
-      updatedAt: now,
-      ...(input.status === "processing" ? { processedAt: now } : {}),
-      ...readyAtUpdate,
-      ...appliedAtUpdate,
-    })
-    .where(and(jobsScopeFilter(), eq(jobs.id, id)));
+  db.transaction((tx) => {
+    tx.update(jobs)
+      .set({
+        ...updateFields,
+        ...(clearsBriefForDescriptionEdit ? { jobBrief: null } : {}),
+        ...(locationEvidence !== undefined
+          ? { locationEvidence: serializeLocationEvidence(locationEvidence) }
+          : {}),
+        updatedAt: now,
+        ...(input.status === "processing" ? { processedAt: now } : {}),
+        ...readyAtUpdate,
+        ...appliedAtUpdate,
+      })
+      .where(and(jobsScopeFilter(), eq(jobs.id, id)))
+      .run();
+    if (Object.hasOwn(input, "outcome") || Object.hasOwn(input, "closedAt"))
+      setCurrentAttemptClosureEvent(id, null);
+  });
 
   return getJobById(id);
 }

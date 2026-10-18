@@ -25,6 +25,7 @@ export const imapConfigSchema = z.object({
   mailbox: z.string().min(1).max(255).default("INBOX"),
   automaticSync: z.boolean().default(false),
   syncIntervalMinutes: z.number().int().min(5).max(1440).default(15),
+  legacyNoticePromotionAllowed: z.boolean().optional(),
   uidValidity: z.string().optional(),
   lastUid: z.number().int().nonnegative().optional(),
   keywordFilterFingerprint: z.string().optional(),
@@ -43,6 +44,15 @@ export const imapConfigSchema = z.object({
     .optional(),
 });
 export type ImapConfig = z.infer<typeof imapConfigSchema>;
+export function imapEndpointIdentity(config: ImapConfig): string {
+  return JSON.stringify([
+    config.host.toLowerCase().replace(/\.$/, ""),
+    config.port,
+    config.security,
+    config.username,
+    config.mailbox,
+  ]);
+}
 
 export function parseImapConfig(value: unknown): ImapConfig {
   const parsed = imapConfigSchema.safeParse(value);

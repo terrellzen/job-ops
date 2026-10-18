@@ -1846,6 +1846,7 @@ sqlite.transaction(() => {
     ["stage_snapshot", "TEXT NOT NULL DEFAULT 'applied'"],
     ["outcome_snapshot", "TEXT"],
     ["closed_at_snapshot", "INTEGER"],
+    ["closure_event_id", "TEXT"],
   ]) {
     if (!tableHasColumn("application_attempts", column))
       sqlite.exec(

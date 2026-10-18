@@ -210,6 +210,59 @@ describe.sequential("durable IMAP identities", () => {
       ).toMatchObject({ id: first.message.id, processingStatus: "ignored" });
     });
   });
+  it.each([
+    true,
+    false,
+  ])("does not transfer legacy dismissal to a different endpoint (Message-ID: %s)", async (hasMessageId) => {
+    const { runImapSync, imapMessageIdentity } = await import("./imap-sync");
+    const repository = await import(
+      "@server/repositories/post-application-messages"
+    );
+    const oldNotice = (
+      await repository.upsertPostApplicationMessage({
+        provider: "imap",
+        accountKey: "one",
+        integrationId: null,
+        syncRunId: null,
+        externalMessageId: `oversized:${imapMessageIdentity("INBOX", "7", 1)}`,
+        fromAddress: "",
+        subject: "Old server email",
+        receivedAt: Date.now(),
+        snippet: "",
+        relevanceDecision: "needs_llm",
+        messageType: "other",
+        processingStatus: "ignored",
+        errorCode: "IMAP_MESSAGE_TOO_LARGE",
+      })
+    ).message;
+    await connect({ port: 1993 });
+    // Display-only reconnects cannot re-enable legacy promotion.
+    await connect({ port: 1993, displayName: "Renamed" });
+    expect((await credentials())?.legacyNoticePromotionAllowed).toBe(false);
+    client.fetchOne.mockResolvedValue({
+      size: 6 * 1024 * 1024,
+      envelope: {
+        ...(hasMessageId ? { messageId: "<different@example.com>" } : {}),
+        subject: "New server email",
+      },
+    });
+    await runImapSync("one");
+    const { db, schema } = await import("@server/db");
+    const messages = db.select().from(schema.postApplicationMessages).all();
+    expect(messages).toHaveLength(2);
+    expect(
+      messages.find((message) => message.id === oldNotice.id),
+    ).toMatchObject({
+      processingStatus: "ignored",
+      subject: "Old server email",
+    });
+    expect(
+      messages.find((message) => message.id !== oldNotice.id),
+    ).toMatchObject({
+      processingStatus: "pending_user",
+      subject: "New server email",
+    });
+  });
   it("preserves a real skip decision across UIDVALIDITY resets and mailbox moves", async () => {
     const { runImapSync } = await import("./imap-sync");
     const review = await import("../review/service");

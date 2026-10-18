@@ -50,3 +50,14 @@ Focused validation: 66 tests passed across six files; after preserving the exist
 - Added real encrypted-repository/SQLite coverage with only the IMAP network boundary mocked, including endpoint changes, persisted dismissal across resets/moves, legacy promotion, and tenant/user/account isolation. All fixtures use isolated temporary databases.
 
 Verification on Node 22.23.1: all seven required CI-parity checks passed. Full suite: 314 files passed, 2,238 tests passed, 6 skipped. Documentation build and whitespace checks passed. Focused checks included 11 real-persistence IMAP cases and the tracking/approval regressions. The active database retains 406 jobs and zero foreign-key violations; live email providers were not contacted by the tests.
+
+## Third audit follow-up (2026-10-18)
+
+- Replaced timestamp/outcome closure-ownership inference with an internal current-attempt `closure_event_id`. Event transitions and recomputations write it; explicit job outcome/closure updates clear it in the same transaction. Unknown pre-upgrade origins remain independent rather than being guessed.
+- Event edits compare the submitted lifecycle values with the stored event. An actual client-generated label-edit request resubmitting unchanged stage/date/null outcome preserves independent closure.
+- Generic Closed events with a manual reason code and null outcome can be deleted through their recorded provenance; reason codes no longer invent rejected outcomes for Closed events.
+- One normalized endpoint identity is shared by checkpoint restoration and no-Message-ID notice identity. Changing endpoints disables legacy location-only promotion, including subsequent display-only reconnects. Existing history remains intact.
+- Regression coverage exercises the actual client formatter, real SQLite/encrypted IMAP storage, endpoint collisions with/without RFC IDs, tenant isolation, and repeat migration preservation of provenance.
+- Local database backup preceded migration. All 406 job status/outcome/applied/closure fields were unchanged afterward, with zero foreign-key violations.
+
+Final verification on Node 22.23.1: all seven CI-parity checks passed; 314 test files passed, 2,242 tests passed, 6 skipped. Documentation production build, local backend health, and whitespace checks passed. Focused lifecycle/IMAP tests passed (62 tests), followed by migration/client-payload/endpoint boundary coverage (44 tests). Live providers and container deployment were not exercised.

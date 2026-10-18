@@ -31,6 +31,7 @@ beforeEach(async () => {
 afterEach(async () => {
   (await import("@server/db")).closeDb();
   await rm(directory, { recursive: true, force: true });
+  vi.doUnmock("@client/api");
   vi.unstubAllEnvs();
 });
 async function job(closed = true) {
@@ -534,6 +535,58 @@ describe.sequential("attempt-aware late email routing", () => {
     tracking.deleteStageEvent(current.id);
     expect(await jobs.getJobById(created.id)).toEqual(before);
   });
+  it("preserves independent closure for the actual UI label-edit payload", async () => {
+    const created = await job(false);
+    const applied = (await tracking.getStageEvents(created.id))[0];
+    const jobs = await import("@server/repositories/jobs");
+    await jobs.updateJob(created.id, {
+      outcome: "rejected",
+      closedAt: Math.floor(Date.now() / 1000),
+    });
+    const before = await jobs.getJobById(created.id);
+    vi.doMock("@client/api", () => ({
+      updateJobStageEvent: async (
+        _jobId: string,
+        eventId: string,
+        payload: Parameters<typeof tracking.updateStageEvent>[1],
+      ) => tracking.updateStageEvent(eventId, payload),
+    }));
+    const { logJobStageEvent } = await import("@client/lib/logJobStageEvent");
+    await logJobStageEvent({
+      jobId: created.id,
+      currentStage: "applied",
+      eventId: applied.id,
+      values: {
+        stage: "applied",
+        title: "Corrected label",
+        date: new Date(applied.occurredAt * 1000).toISOString(),
+        notes: "Edited label",
+      },
+    });
+    expect(await jobs.getJobById(created.id)).toEqual(before);
+    expect((await tracking.getStageEvents(created.id))[0].title).toBe(
+      "Corrected label",
+    );
+    vi.doUnmock("@client/api");
+  });
+  it("deletes a genuine generic closure with the UI reason code and null outcome", async () => {
+    const created = await job(false);
+    const event = tracking.transitionStage(
+      created.id,
+      "closed",
+      Math.floor(Date.now() / 1000),
+      { actor: "user", reasonCode: "job_page_manual_stage" },
+      null,
+    );
+    expect(
+      repo.getScopedAttempt(repo.listApplicationAttempts(created.id)[0].id)
+        ?.closureEventId,
+    ).toBe(event.id);
+    tracking.deleteStageEvent(event.id);
+    expect(
+      await (await import("@server/repositories/jobs")).getJobById(created.id),
+    ).toMatchObject({ status: "applied", closedAt: null, outcome: null });
+  });
   it("does not reopen an old attempt after a later reapplication exists", async () => {
     const created = await job();
     const oldAttempt = repo.listApplicationAttempts(created.id)[0];
@@ -580,7 +633,9 @@ describe.sequential("attempt-aware late email routing", () => {
     repo.rememberAttemptIdentity("imap", "account", attempt.id, {
       threadId: "private",
     });
+    const closureOwner = repo.getScopedAttempt(attempt.id)?.closureEventId;
     await runWithRequestContext({ tenantId: "other" }, async () => {
+      repo.setCurrentAttemptClosureEvent(created.id, null);
       expect(
         repo.findIdentityAttempts("imap", "account", { threadId: "private" }),
       ).toEqual([]);
@@ -595,6 +650,9 @@ describe.sequential("attempt-aware late email routing", () => {
         }),
       ).rejects.toMatchObject({ status: 404 });
     });
+    expect(repo.getScopedAttempt(attempt.id)?.closureEventId).toBe(
+      closureOwner,
+    );
     await db.insert(schema.users).values([
       {
         id: "one",

@@ -407,12 +407,14 @@ describe.sequential("database migrations", () => {
       if (database.prepare('SELECT application_attempt_id AS id FROM post_application_messages WHERE id = ?').get('mail').id !== first.id) throw new Error('Legacy mail not associated');
       database.prepare('INSERT INTO application_attempts(id, tenant_id, job_id, sequence, applied_at) VALUES (?, ?, ?, ?, ?)').run('second', 'tenant_default', 'legacy', 2, Date.now());
       database.prepare('UPDATE post_application_messages SET application_attempt_id = ? WHERE id = ?').run('second', 'mail');
+      database.prepare('UPDATE application_attempts SET closure_event_id = ? WHERE id = ?').run('event', first.id);
       database.prepare('INSERT INTO application_email_identities(id, tenant_id, provider, account_key, kind, identity_hash, attempt_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run('binding', 'tenant_default', 'imap', 'account', 'thread', 'hash', 'second');
       database.close();
       await import(migrate + '?repeat');
       database = new Database(path);
       if (database.prepare('SELECT requisition_id FROM application_attempts WHERE id = ?').get(first.id).requisition_id !== 'REQ-123') throw new Error('Existing upgraded attempt not repaired');
       if (database.prepare('SELECT requisition_id FROM application_attempts WHERE id = ?').get('second').requisition_id !== null) throw new Error('Migration copied initial posting ID to reapplication');
+      if (database.prepare('SELECT closure_event_id FROM application_attempts WHERE id = ?').get(first.id).closure_event_id !== 'event') throw new Error('Migration lost explicit closure provenance');
       if (database.prepare('SELECT count(*) AS n FROM application_attempts WHERE job_id = ?').get('legacy').n !== 2) throw new Error('Repeated migration lost attempts');
       if (database.prepare('SELECT application_attempt_id AS id FROM post_application_messages WHERE id = ?').get('mail').id !== 'second') throw new Error('Repeated migration lost email association');
       if (database.prepare('SELECT count(*) AS n FROM application_email_identities').get().n !== 1) throw new Error('Repeated migration lost identities');

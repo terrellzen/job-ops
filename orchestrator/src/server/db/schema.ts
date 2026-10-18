@@ -331,6 +331,7 @@ export const applicationAttempts = sqliteTable(
     stageSnapshot: text("stage_snapshot").notNull().default("applied"),
     outcomeSnapshot: text("outcome_snapshot"),
     closedAtSnapshot: integer("closed_at_snapshot"),
+    closureEventId: text("closure_event_id"),
   },
   (table) => ({
     jobSequence: uniqueIndex("idx_application_attempt_job_sequence").on(

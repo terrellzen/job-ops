@@ -25,7 +25,10 @@ import {
   routeExistingPendingMessages,
 } from "../attempt-routing";
 import { providerUpstreamError } from "../providers/errors";
-import { parseImapConfig } from "../providers/imap-credentials";
+import {
+  imapEndpointIdentity,
+  parseImapConfig,
+} from "../providers/imap-credentials";
 import { getEmailKeywordFilter } from "./email-keywords";
 import { classifyWithSmartRouter, minifyActiveJobs } from "./email-router";
 import { withImapConnection } from "./imap-client";
@@ -214,8 +217,21 @@ export async function runImapSync(
               accountKey,
               integrationId: integration.id,
               syncRunId: run.id,
-              externalMessageId: `oversized:${imapMessageIdentity(config.mailbox, validity, uid, metadata.envelope?.messageId)}`,
-              previousExternalMessageId: `oversized:${imapMessageIdentity(config.mailbox, validity, uid)}`,
+              externalMessageId: metadata.envelope?.messageId?.trim()
+                ? `oversized:${imapMessageIdentity(config.mailbox, validity, uid, metadata.envelope.messageId)}`
+                : `oversized-endpoint:${createHash("sha256")
+                    .update(
+                      JSON.stringify([
+                        imapEndpointIdentity(config),
+                        validity,
+                        uid,
+                      ]),
+                    )
+                    .digest("hex")}`,
+              previousExternalMessageId:
+                config.legacyNoticePromotionAllowed !== false
+                  ? `oversized:${imapMessageIdentity(config.mailbox, validity, uid)}`
+                  : undefined,
               fromAddress: metadata.envelope?.from?.[0]?.address ?? "",
               subject:
                 metadata.envelope?.subject ??
