@@ -1,5 +1,10 @@
 import { z } from "zod";
 import {
+  defaultEmailKeywordFilter,
+  type EmailKeywordFilter,
+  emailKeywordFilterSchema,
+} from "./email-keywords";
+import {
   LOCATION_INPUT_MODE_VALUES,
   LOCATION_MATCH_STRICTNESS_VALUES,
   LOCATION_SEARCH_SCOPE_VALUES,
@@ -822,6 +827,19 @@ export const settingsRegistry = {
     serialize: (
       value: ChatStyleManualLanguage | null | undefined,
     ): string | null => value ?? null,
+  },
+  emailKeywordFilter: {
+    kind: "typed" as const,
+    schema: emailKeywordFilterSchema,
+    default: defaultEmailKeywordFilter,
+    parse: (raw: string | undefined): EmailKeywordFilter | null => {
+      const parsed = emailKeywordFilterSchema.safeParse(
+        parseJsonObjectOrNull(raw),
+      );
+      return parsed.success ? parsed.data : null;
+    },
+    serialize: (value: EmailKeywordFilter | null | undefined): string | null =>
+      value ? JSON.stringify(value) : null,
   },
   backupEnabled: {
     kind: "typed" as const,

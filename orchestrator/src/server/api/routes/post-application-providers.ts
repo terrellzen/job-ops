@@ -2,8 +2,25 @@ import { randomUUID } from "node:crypto";
 import { badRequest, serviceUnavailable, upstreamError } from "@infra/errors";
 import { asyncRoute, fail, ok } from "@infra/http";
 import { logger } from "@infra/logger";
+import {
+  getPostApplicationIntegration,
+  listPostApplicationIntegrations,
+} from "@server/repositories/post-application-integrations";
+import {
+  getEmailKeywordFilter,
+  keywordLanguageSchema,
+  saveEmailKeywordFilter,
+  suggestEmailKeywords,
+} from "@server/services/post-application/ingestion/email-keywords";
+import { withImapConnection } from "@server/services/post-application/ingestion/imap-client";
 import { executePostApplicationProviderAction } from "@server/services/post-application/providers";
+import { toProviderAppError } from "@server/services/post-application/providers/errors";
+import {
+  parseImapConfig,
+  publicImapConfig,
+} from "@server/services/post-application/providers/imap-credentials";
 import { getPrivateDataScope } from "@server/tenancy/private-scope";
+import { emailKeywordFilterSchema } from "@shared/email-keywords";
 import {
   POST_APPLICATION_PROVIDER_ACTIONS,
   POST_APPLICATION_PROVIDERS,
@@ -40,6 +57,37 @@ const oauthExchangeBodySchema = z.object({
 });
 
 export const postApplicationProvidersRouter = Router();
+
+postApplicationProvidersRouter.get(
+  "/email-keywords",
+  asyncRoute(async (_req, res) => {
+    ok(res, await getEmailKeywordFilter());
+  }),
+);
+postApplicationProvidersRouter.patch(
+  "/email-keywords",
+  asyncRoute(async (req, res) => {
+    const parsed = emailKeywordFilterSchema.safeParse(req.body);
+    if (!parsed.success)
+      throw badRequest(
+        "Invalid email keyword filters.",
+        parsed.error.flatten(),
+      );
+    ok(res, await saveEmailKeywordFilter(parsed.data));
+  }),
+);
+postApplicationProvidersRouter.post(
+  "/email-keywords/suggest",
+  asyncRoute(async (req, res) => {
+    const parsed = z
+      .object({ language: keywordLanguageSchema })
+      .strict()
+      .safeParse(req.body);
+    if (!parsed.success)
+      throw badRequest("Choose a valid language.", parsed.error.flatten());
+    ok(res, { keywords: await suggestEmailKeywords(parsed.data.language) });
+  }),
+);
 
 const GMAIL_OAUTH_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const oauthStateStore = new Map<
@@ -419,5 +467,64 @@ postApplicationProvidersRouter.post(
     });
 
     ok(res, response);
+  }),
+);
+
+postApplicationProvidersRouter.get(
+  "/accounts",
+  asyncRoute(async (_req, res) => {
+    const accounts = await listPostApplicationIntegrations();
+    ok(res, {
+      accounts: accounts
+        .filter((account) => account.status !== "disconnected")
+        .map((account) => ({
+          ...account,
+          credentials:
+            account.provider === "imap"
+              ? publicImapConfig(account.credentials)
+              : { email: account.credentials?.email ?? null },
+        })),
+    });
+  }),
+);
+postApplicationProvidersRouter.post(
+  "/providers/imap/test",
+  asyncRoute(async (req, res) => {
+    let config: ReturnType<typeof parseImapConfig>;
+    try {
+      const body = z
+        .object({
+          accountKey: z.string().min(1).max(255).nullable().optional(),
+          payload: z.record(z.unknown()),
+        })
+        .parse(req.body);
+      const saved = body.accountKey
+        ? await getPostApplicationIntegration("imap", body.accountKey)
+        : null;
+      const sameLogin =
+        Boolean(saved?.credentials) &&
+        saved?.credentials?.host === body.payload.host &&
+        saved?.credentials?.username === body.payload.username &&
+        saved?.credentials?.authMethod ===
+          (body.payload.authMethod ?? "password");
+      config = parseImapConfig({
+        ...(sameLogin ? saved?.credentials : {}),
+        ...body.payload,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError)
+        throw badRequest("Invalid IMAP test request.");
+      throw toProviderAppError(error);
+    }
+    let mailboxes: string[];
+    try {
+      mailboxes = await withImapConnection(config, async (client) => {
+        await client.mailboxOpen(config.mailbox, { readOnly: true });
+        return (await client.list()).map((mailbox) => mailbox.path);
+      });
+    } catch (error) {
+      throw toProviderAppError(error);
+    }
+    ok(res, { message: "Connection successful.", mailboxes });
   }),
 );

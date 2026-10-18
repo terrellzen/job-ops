@@ -1,5 +1,7 @@
 import { badRequest } from "@infra/errors";
 import { asyncRoute, fail, ok } from "@infra/http";
+import { listApplicationAttempts } from "@server/repositories/application-attempts";
+import { startNewApplicationAttempt } from "@server/services/post-application/application-attempts";
 import {
   approvePostApplicationInboxItem,
   denyPostApplicationInboxItem,
@@ -30,15 +32,32 @@ const runParamsSchema = z.object({
   runId: z.string().uuid(),
 });
 
-const approveBodySchema = z.object({
-  provider: z.enum(POST_APPLICATION_PROVIDERS).default("gmail"),
-  accountKey: z.string().min(1).max(255).default("default"),
-  jobId: z.string().uuid().optional(),
-  stageTarget: z.enum(POST_APPLICATION_ROUTER_STAGE_TARGETS).optional(),
-  toStage: z.enum(APPLICATION_STAGES).optional(),
-  note: z.string().max(2000).optional(),
-  decidedBy: z.string().max(255).optional(),
-});
+const approveBodySchema = z
+  .object({
+    provider: z.enum(POST_APPLICATION_PROVIDERS).default("gmail"),
+    accountKey: z.string().min(1).max(255).default("default"),
+    jobId: z.string().uuid().optional(),
+    applicationAttemptId: z.string().min(1).max(100).optional(),
+    newAttempt: z.boolean().optional(),
+    reopen: z.boolean().optional(),
+    appliedAt: z
+      .number()
+      .int()
+      .nonnegative()
+      .refine(
+        (value) => value <= Date.now() + 300000,
+        "Application date cannot be in the future.",
+      )
+      .optional(),
+    stageTarget: z.enum(POST_APPLICATION_ROUTER_STAGE_TARGETS).optional(),
+    toStage: z.enum(APPLICATION_STAGES).optional(),
+    note: z.string().max(2000).optional(),
+    decidedBy: z.string().max(255).optional(),
+  })
+  .refine(
+    (value) => !(value.newAttempt && value.reopen),
+    "Choose either a new application or reopening the current attempt.",
+  );
 
 const denyBodySchema = z.object({
   provider: z.enum(POST_APPLICATION_PROVIDERS).default("gmail"),
@@ -136,6 +155,10 @@ postApplicationReviewRouter.post(
         provider: input.provider,
         accountKey: input.accountKey,
         jobId: input.jobId,
+        applicationAttemptId: input.applicationAttemptId,
+        newAttempt: input.newAttempt,
+        reopen: input.reopen,
+        appliedAt: input.appliedAt,
         stageTarget: input.stageTarget,
         toStage: input.toStage,
         note: input.note,
@@ -199,5 +222,32 @@ postApplicationReviewRouter.post(
       }
       throw error;
     }
+  }),
+);
+
+postApplicationReviewRouter.get(
+  "/jobs/:jobId/attempts",
+  asyncRoute(async (req, res) => {
+    const { jobId } = z.object({ jobId: z.string().uuid() }).parse(req.params);
+    ok(res, { attempts: listApplicationAttempts(jobId) });
+  }),
+);
+postApplicationReviewRouter.post(
+  "/jobs/:jobId/attempts",
+  asyncRoute(async (req, res) => {
+    const { jobId } = z.object({ jobId: z.string().uuid() }).parse(req.params);
+    const input = z
+      .object({
+        appliedAt: z
+          .number()
+          .int()
+          .min(0)
+          .max(Date.now() + 300000)
+          .default(() => Date.now()),
+        applicationReference: z.string().trim().min(1).max(80).optional(),
+        requisitionId: z.string().trim().min(1).max(80).optional(),
+      })
+      .parse(req.body ?? {});
+    ok(res, { attempts: startNewApplicationAttempt(jobId, input) });
   }),
 );

@@ -58,6 +58,12 @@ JobOps starts OAuth with:
 - `access_type=offline` (requests refresh token)
 - `prompt=consent` (forces consent screen so refresh token is returned reliably)
 
+### Sync limits and languages
+
+Set **Search Days** (default 90, range 1–365) and **Max Messages** (default 100, range 1–500), then select **Sync**. English and German keyword presets are enabled by default. Add custom phrases, optionally ask AI for language-specific suggestions, and select **Save filters**. Turn keyword filtering off to search all wording in the date window. See [Email search keywords](/docs/next/getting-started/email-search-keywords).
+
+Matching candidate messages count toward Max Messages. The configured AI model classifies application updates in any language, including mixed-language emails. Each new candidate's required email text and active job company/title context are sent to your configured AI provider. Review suggestions because model accuracy varies by language.
+
 ### 4) Scope reference (required vs not required)
 
 Required by JobOps:
@@ -94,3 +100,5 @@ Not required for JobOps Gmail ingestion:
 - [Post-Application Tracking](/docs/next/features/post-application-tracking)
 - [Post-Application Workflow](/docs/next/workflows/post-application-workflow)
 - [Common Problems](/docs/next/troubleshooting/common-problems)
+
+For other providers or password/app-password authentication, see [IMAP email accounts](/docs/next/getting-started/imap-email-setup). Configure each mailbox through only one integration.

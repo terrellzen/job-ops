@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { trackServerProductEvent } from "@infra/product-analytics";
+import {
+  ensureInitialApplicationAttempt,
+  getScopedAttempt,
+} from "@server/repositories/application-attempts";
 import { trackCanonicalActivationEvent } from "@server/services/activation-funnel";
 import type {
   ApplicationStage,
@@ -88,8 +92,26 @@ export async function getStageEvents(
     )
     .orderBy(asc(stageEvents.occurredAt));
 
+  const attemptRows = db
+    .select({
+      id: schema.applicationAttempts.id,
+      sequence: schema.applicationAttempts.sequence,
+    })
+    .from(schema.applicationAttempts)
+    .where(
+      and(
+        privateDataScopeFilter(schema.applicationAttempts),
+        eq(schema.applicationAttempts.jobId, applicationId),
+      ),
+    )
+    .all();
+  const sequences = new Map(attemptRows.map((row) => [row.id, row.sequence]));
   return rows.map((row) => ({
     id: row.id,
+    applicationAttemptId: row.applicationAttemptId,
+    attemptSequence: row.applicationAttemptId
+      ? (sequences.get(row.applicationAttemptId) ?? 1)
+      : 1,
     applicationId: row.applicationId,
     title: row.title,
     groupId: row.groupId ?? null,
@@ -155,6 +177,10 @@ export function transitionStage(
       throw new Error("Job not found");
     }
 
+    const applicationAttemptId = ensureInitialApplicationAttempt(
+      applicationId,
+      timestamp * 1000,
+    );
     const lastEvent = tx
       .select()
       .from(stageEvents)
@@ -162,6 +188,7 @@ export function transitionStage(
         and(
           stageEventsScopeFilter(),
           eq(stageEvents.applicationId, applicationId),
+          eq(stageEvents.applicationAttemptId, applicationAttemptId),
         ),
       )
       .orderBy(desc(stageEvents.occurredAt))
@@ -181,6 +208,7 @@ export function transitionStage(
         tenantId: scope.tenantId,
         userId: scope.userId,
         applicationId,
+        applicationAttemptId,
         title: parsedMetadata?.eventLabel ?? finalToStage,
         groupId: parsedMetadata?.groupId ?? null,
         fromStage,
@@ -221,6 +249,8 @@ export function transitionStage(
       event: {
         id: eventId,
         applicationId,
+        applicationAttemptId,
+        attemptSequence: getScopedAttempt(applicationAttemptId)?.sequence ?? 1,
         title: parsedMetadata?.eventLabel ?? finalToStage,
         groupId: parsedMetadata?.groupId ?? null,
         fromStage,
@@ -278,7 +308,10 @@ export function updateStageEvent(
       .where(and(stageEventsScopeFilter(), eq(stageEvents.id, eventId)))
       .run();
 
-    // If this was the latest event, update the job status
+    // Historical attempts must never change the current attempt’s job status.
+    const currentAttemptId = ensureInitialApplicationAttempt(
+      event.applicationId,
+    );
     const lastEvent = tx
       .select()
       .from(stageEvents)
@@ -286,6 +319,7 @@ export function updateStageEvent(
         and(
           stageEventsScopeFilter(),
           eq(stageEvents.applicationId, event.applicationId),
+          eq(stageEvents.applicationAttemptId, currentAttemptId),
         ),
       )
       .orderBy(desc(stageEvents.occurredAt))
@@ -337,7 +371,10 @@ export function deleteStageEvent(eventId: string): void {
       .where(and(stageEventsScopeFilter(), eq(stageEvents.id, eventId)))
       .run();
 
-    // Update job status based on the new latest event
+    // Recompute using the current attempt only.
+    const currentAttemptId = ensureInitialApplicationAttempt(
+      event.applicationId,
+    );
     const lastEvent = tx
       .select()
       .from(stageEvents)
@@ -345,6 +382,7 @@ export function deleteStageEvent(eventId: string): void {
         and(
           stageEventsScopeFilter(),
           eq(stageEvents.applicationId, event.applicationId),
+          eq(stageEvents.applicationAttemptId, currentAttemptId),
         ),
       )
       .orderBy(desc(stageEvents.occurredAt))

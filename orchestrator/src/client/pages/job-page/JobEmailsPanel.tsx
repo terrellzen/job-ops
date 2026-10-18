@@ -137,6 +137,12 @@ const EmailRow: React.FC<{ item: PostApplicationJobEmailItem }> = ({
             <p className="mt-2 line-clamp-2 text-sm leading-6 text-muted-foreground">
               {item.message.snippet || "No snippet captured."}
             </p>
+            {typeof item.message.classificationPayload?.linkDecision ===
+              "string" && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                {item.message.classificationPayload.linkDecision}
+              </p>
+            )}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Badge
                 variant="outline"
@@ -147,6 +153,12 @@ const EmailRow: React.FC<{ item: PostApplicationJobEmailItem }> = ({
               >
                 {statusLabel[item.message.processingStatus]}
               </Badge>
+              {typeof item.message.classificationPayload?.attemptSequence ===
+                "number" && (
+                <Badge variant="outline" className="text-[10px]">
+                  Attempt {item.message.classificationPayload.attemptSequence}
+                </Badge>
+              )}
               <Badge variant="secondary" className="text-[10px] capitalize">
                 {item.message.messageType.replace(/_/g, " ")}
               </Badge>

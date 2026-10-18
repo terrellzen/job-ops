@@ -44,6 +44,7 @@ function makeInboxItem() {
       relevanceLlmScore: 95,
       relevanceDecision: "relevant" as const,
       matchedJobId: "job-2",
+      applicationAttemptId: "attempt-1",
       matchConfidence: 95,
       stageTarget: "technical_interview" as const,
       messageType: "interview" as const,
@@ -56,6 +57,20 @@ function makeInboxItem() {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
+    attempts: [
+      {
+        id: "attempt-1",
+        jobId: "job-2",
+        sequence: 1,
+        appliedAt: Date.now() - 86400000,
+        stage: "applied",
+        closedAt: null,
+        outcome: null,
+        current: true,
+        applicationReference: null,
+        requisitionId: null,
+      },
+    ],
     matchedJob: {
       id: "job-2",
       title: "Software Engineer",

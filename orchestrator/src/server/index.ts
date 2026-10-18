@@ -19,6 +19,7 @@ import { attachChallengeViewerUpgradeProxy } from "./services/challenge-viewer";
 import { initializeDemoModeServices } from "./services/demo-mode";
 import { applyStoredEnvOverrides } from "./services/envSettings";
 import { initializeHistoricalServerEventReplaySafely } from "./services/historical-product-analytics";
+import { startImapScheduler } from "./services/post-application/ingestion/imap-scheduler";
 import { initialize as initializeVisaSponsors } from "./services/visa-sponsors/index";
 
 const AUTH_SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
@@ -58,6 +59,9 @@ async function startServer() {
   }
 
   const app = createApp();
+  const stopImapScheduler = startImapScheduler();
+  process.once("SIGTERM", stopImapScheduler);
+  process.once("SIGINT", stopImapScheduler);
   const PORT = process.env.PORT || 3001;
 
   // Start server

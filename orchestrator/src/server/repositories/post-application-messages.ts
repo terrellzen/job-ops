@@ -29,7 +29,8 @@ function integrationsScopeFilter() {
   return privateDataScopeFilter(postApplicationIntegrations);
 }
 
-type UpsertPostApplicationMessageInput = {
+export type UpsertPostApplicationMessageInput = {
+  applicationAttemptId?: string | null;
   provider: PostApplicationProvider;
   accountKey: string;
   integrationId: string | null;
@@ -115,6 +116,7 @@ function mapRowToPostApplicationMessage(
 
   return {
     id: row.id,
+    applicationAttemptId: row.applicationAttemptId,
     provider: row.provider,
     accountKey: row.accountKey,
     integrationId: row.integrationId,
@@ -240,6 +242,13 @@ export async function upsertPostApplicationMessage(
     await db
       .update(postApplicationMessages)
       .set({
+        applicationAttemptId: isTerminalProcessingStatus(
+          existing.processingStatus,
+        )
+          ? (existing.applicationAttemptId ?? null)
+          : input.applicationAttemptId !== undefined
+            ? input.applicationAttemptId
+            : (existing.applicationAttemptId ?? null),
         integrationId: input.integrationId,
         syncRunId: input.syncRunId,
         externalThreadId: input.externalThreadId ?? null,
@@ -258,9 +267,15 @@ export async function upsertPostApplicationMessage(
         messageType: input.messageType,
         stageEventPayload,
         processingStatus: nextProcessingStatus,
-        matchedJobId: input.matchedJobId ?? null,
-        decidedAt: input.decidedAt ?? null,
-        decidedBy: input.decidedBy ?? null,
+        matchedJobId: isTerminalProcessingStatus(existing.processingStatus)
+          ? existing.matchedJobId
+          : (input.matchedJobId ?? null),
+        decidedAt: isTerminalProcessingStatus(existing.processingStatus)
+          ? existing.decidedAt
+          : (input.decidedAt ?? null),
+        decidedBy: isTerminalProcessingStatus(existing.processingStatus)
+          ? existing.decidedBy
+          : (input.decidedBy ?? null),
         errorCode: input.errorCode ?? null,
         errorMessage: input.errorMessage ?? null,
         updatedAt: nowIso,
@@ -290,6 +305,7 @@ export async function upsertPostApplicationMessage(
   const id = randomUUID();
   await db.insert(postApplicationMessages).values({
     id,
+    applicationAttemptId: input.applicationAttemptId ?? null,
     tenantId: scope.tenantId,
     userId: scope.userId,
     provider: input.provider,

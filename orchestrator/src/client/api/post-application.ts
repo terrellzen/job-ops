@@ -141,6 +141,10 @@ export async function approvePostApplicationInboxItem(input: {
   provider?: PostApplicationProvider;
   accountKey?: string;
   jobId?: string;
+  applicationAttemptId?: string;
+  newAttempt?: boolean;
+  reopen?: boolean;
+  appliedAt?: number;
   stageTarget?: PostApplicationRouterStageTarget;
   toStage?: ApplicationStage;
   note?: string;
@@ -158,6 +162,12 @@ export async function approvePostApplicationInboxItem(input: {
       provider: input.provider ?? "gmail",
       accountKey: input.accountKey ?? "default",
       ...(input.jobId ? { jobId: input.jobId } : {}),
+      ...(input.applicationAttemptId
+        ? { applicationAttemptId: input.applicationAttemptId }
+        : {}),
+      ...(input.newAttempt ? { newAttempt: true } : {}),
+      ...(input.reopen ? { reopen: true } : {}),
+      ...(input.appliedAt !== undefined ? { appliedAt: input.appliedAt } : {}),
       ...(input.stageTarget ? { stageTarget: input.stageTarget } : {}),
       ...(input.toStage ? { toStage: input.toStage } : {}),
       ...(input.note ? { note: input.note } : {}),

@@ -6,6 +6,11 @@ import {
 } from "@infra/errors";
 import { trackServerProductEvent } from "@infra/product-analytics";
 import { db, schema } from "@server/db";
+import {
+  createApplicationAttempt,
+  getScopedAttempt,
+  listApplicationAttempts,
+} from "@server/repositories/application-attempts";
 import { getJobById, listJobSummariesByIds } from "@server/repositories/jobs";
 import {
   getPostApplicationMessageById,
@@ -33,7 +38,13 @@ import type {
   PostApplicationRouterStageTarget,
   PostApplicationSyncRun,
 } from "@shared/types";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
+import {
+  bindConfirmedMessage,
+  isClosedAttemptOpportunity,
+  messageIdentity,
+  routeExistingPendingMessages,
+} from "../attempt-routing";
 
 const { postApplicationMessages, postApplicationSyncRuns } = schema;
 
@@ -52,6 +63,9 @@ function buildMatchedJobMap(
   const jobById = new Map(jobs.map((job) => [job.id, job]));
   return items.map((message) => ({
     message,
+    attempts: message.matchedJobId
+      ? listApplicationAttempts(message.matchedJobId)
+      : [],
     matchedJob: message.matchedJobId
       ? (jobById.get(message.matchedJobId) ?? null)
       : null,
@@ -63,6 +77,7 @@ export async function listPostApplicationInbox(args: {
   accountKey: string;
   limit?: number;
 }): Promise<PostApplicationInboxItem[]> {
+  await routeExistingPendingMessages(args.provider, args.accountKey);
   const limit = args.limit ?? 50;
   const messages = await listPostApplicationMessagesByProcessingStatus(
     args.provider,
@@ -83,6 +98,10 @@ export async function approvePostApplicationInboxItem(args: {
   provider: PostApplicationProvider;
   accountKey: string;
   jobId?: string;
+  applicationAttemptId?: string;
+  newAttempt?: boolean;
+  reopen?: boolean;
+  appliedAt?: number;
   stageTarget?: PostApplicationRouterStageTarget;
   toStage?: ApplicationStage;
   note?: string;
@@ -121,11 +140,75 @@ export async function approvePostApplicationInboxItem(args: {
     let stageEventId: string | null = null;
     const decidedAtIso = new Date(decidedAt).toISOString();
 
+    let selectedAttempt =
+      args.applicationAttemptId ?? message.applicationAttemptId;
+    const attempts = listApplicationAttempts(resolvedJobId);
+    if (args.newAttempt) {
+      const identity = messageIdentity(message);
+      const created = createApplicationAttempt(resolvedJobId, {
+        appliedAt: args.appliedAt ?? Date.now(),
+        applicationReference: identity.applicationReference,
+        requisitionId: identity.requisitionId,
+      });
+      selectedAttempt = created.id;
+      tx.update(schema.jobs)
+        .set({
+          outcome: null,
+          closedAt: null,
+          appliedAt: new Date(created.appliedAt).toISOString(),
+        })
+        .where(
+          and(
+            privateDataScopeFilter(schema.jobs),
+            eq(schema.jobs.id, resolvedJobId),
+          ),
+        )
+        .run();
+      transitionStage(
+        resolvedJobId,
+        "applied",
+        Math.floor(created.appliedAt / 1000),
+        {
+          actor: "user",
+          eventType: "status_update",
+          eventLabel: `Application attempt ${created.sequence} started`,
+        },
+      );
+    } else if (!selectedAttempt) {
+      if (attempts.length !== 1)
+        throw conflict(
+          "Select the previous or current application attempt before approving this email.",
+        );
+      selectedAttempt = attempts[0].id;
+    }
+    if (!selectedAttempt) throw notFound("Application attempt not found.");
+    const attemptRow = getScopedAttempt(selectedAttempt);
+    if (!attemptRow || attemptRow.jobId !== resolvedJobId)
+      throw notFound("Application attempt not found for this job.");
+    const selected = listApplicationAttempts(resolvedJobId).find(
+      (item) => item.id === selectedAttempt,
+    );
+    if (!selected) throw notFound("Application attempt not found.");
+    if (args.reopen && (!selected.current || !selected.closedAt))
+      throw conflict(
+        "Only the current closed application attempt can be reopened. Link older attempts without changing status.",
+      );
+
     const messageUpdateResult = tx
       .update(postApplicationMessages)
       .set({
         processingStatus: "manual_linked",
         matchedJobId: resolvedJobId,
+        applicationAttemptId: selectedAttempt,
+        classificationPayload: {
+          ...message.classificationPayload,
+          attemptSequence: selected.sequence,
+          attemptReviewReason: null,
+          linkDecision:
+            selected.closedAt && !args.reopen
+              ? "Email linked; application remains closed."
+              : null,
+        },
         decidedAt,
         decidedBy: args.decidedBy ?? null,
         updatedAt: decidedAtIso,
@@ -150,20 +233,90 @@ export async function approvePostApplicationInboxItem(args: {
       message.stageTarget ??
       stageTargetFromMessageType(message.messageType);
     const transition = resolveStageTransitionForTarget(resolvedTarget);
+    if (
+      args.reopen &&
+      !isClosedAttemptOpportunity(resolvedTarget, message.stageEventPayload)
+    )
+      throw conflict(
+        "Reopening requires an invitation, offer, or explicit request to resume the application.",
+      );
 
-    if (transition.toStage !== "no_change") {
+    let shouldTransition =
+      transition.toStage !== "no_change" &&
+      selected.current &&
+      !selected.closedAt;
+    if (args.newAttempt && transition.toStage === "applied")
+      shouldTransition = false;
+    if (args.reopen) {
+      tx.update(schema.jobs)
+        .set({ outcome: null, closedAt: null })
+        .where(
+          and(
+            privateDataScopeFilter(schema.jobs),
+            eq(schema.jobs.id, resolvedJobId),
+          ),
+        )
+        .run();
+      shouldTransition = true;
+    }
+    // Old active-attempt messages link without rewriting a newer confirmed stage.
+    const latest = tx
+      .select()
+      .from(schema.stageEvents)
+      .where(
+        and(
+          privateDataScopeFilter(schema.stageEvents),
+          eq(schema.stageEvents.applicationAttemptId, selectedAttempt),
+        ),
+      )
+      .orderBy(desc(schema.stageEvents.occurredAt))
+      .all()
+      .find(
+        (event) =>
+          (event.metadata as { eventType?: string } | null)?.eventType !==
+          "note",
+      );
+    if (
+      !args.reopen &&
+      !args.newAttempt &&
+      latest &&
+      latest.occurredAt * 1000 >= message.receivedAt
+    ) {
+      if (
+        shouldTransition &&
+        (latest.toStage !== transition.toStage ||
+          (targetJob.outcome ?? null) !== transition.outcome)
+      )
+        throw conflict(
+          "This email predates a confirmed application update. Use Link only to preserve the current stage.",
+        );
+      shouldTransition = false;
+    }
+    bindConfirmedMessage({
+      ...message,
+      matchedJobId: resolvedJobId,
+      applicationAttemptId: selectedAttempt,
+    });
+
+    if (shouldTransition) {
       const event = transitionStage(
         resolvedJobId,
-        transition.toStage,
+        args.reopen && transition.toStage === "no_change"
+          ? "recruiter_screen"
+          : transition.toStage,
         Math.floor(
-          Number.isFinite(message.receivedAt)
-            ? message.receivedAt / 1000
-            : decidedAt / 1000,
+          args.reopen || args.newAttempt
+            ? Date.now() / 1000
+            : Number.isFinite(message.receivedAt)
+              ? message.receivedAt / 1000
+              : decidedAt / 1000,
         ),
         {
-          actor: "system",
+          actor: "user",
           eventType: "status_update",
-          eventLabel: `Post-application: ${resolvedTarget}`,
+          eventLabel: args.reopen
+            ? "Reopened from email"
+            : `Post-application: ${resolvedTarget}`,
           note: args.note ?? null,
           reasonCode: transition.reasonCode ?? "post_application_manual_linked",
         },
@@ -242,6 +395,7 @@ export async function denyPostApplicationInboxItem(args: {
       .set({
         processingStatus: "ignored",
         matchedJobId: null,
+        applicationAttemptId: null,
         decidedAt,
         decidedBy: args.decidedBy ?? null,
         updatedAt: decidedAtIso,
@@ -305,6 +459,18 @@ export async function runPostApplicationInboxAction(
     const { message, matchedJob } = item;
 
     if (action === "approve") {
+      if (!message.applicationAttemptId && (item.attempts?.length ?? 0) > 1) {
+        skipped++;
+        results.push({
+          messageId: message.id,
+          ok: false,
+          error: {
+            code: "ATTEMPT_REQUIRED",
+            message: "Choose the correct application attempt individually.",
+          },
+        });
+        continue;
+      }
       if (!matchedJob) {
         skipped++;
         results.push({

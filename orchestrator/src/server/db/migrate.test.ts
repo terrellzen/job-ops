@@ -375,4 +375,50 @@ describe.sequential("database migrations", () => {
       },
     );
   });
+  it("backfills legacy application attempts once and preserves associations on repeated migrations", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "job-ops-attempt-migrate-"));
+    const script = `
+      import { join } from "node:path";
+      import { pathToFileURL } from "node:url";
+      import Database from "better-sqlite3";
+      const migrate = pathToFileURL(join(process.cwd(), "src/server/db/migrate.ts")).href;
+      await import(migrate);
+      const path = join(process.env.DATA_DIR, "jobs.db");
+      let database = new Database(path);
+      database.exec(\`
+        ALTER TABLE stage_events DROP COLUMN application_attempt_id;
+        ALTER TABLE post_application_messages DROP COLUMN application_attempt_id;
+        DROP TABLE application_email_identities;
+        DROP TABLE application_attempts;
+        INSERT INTO jobs(id, title, employer, job_url, status, applied_at, closed_at, outcome)
+          VALUES ('legacy', 'Engineer', 'Acme', 'https://example.com/legacy', 'in_progress', '2025-01-01T00:00:00Z', 1738368000, 'withdrawn');
+        INSERT INTO stage_events(id, application_id, title, to_stage, occurred_at, outcome)
+          VALUES ('event', 'legacy', 'Closed', 'closed', 1738368000, 'withdrawn');
+        INSERT INTO post_application_messages(id, provider, external_message_id, matched_job_id, received_at)
+          VALUES ('mail', 'imap', 'external', 'legacy', 1738367000000);
+      \`);
+      database.close();
+      await import(migrate + '?legacy');
+      database = new Database(path);
+      const first = database.prepare('SELECT * FROM application_attempts WHERE job_id = ?').get('legacy');
+      if (!first || first.sequence !== 1 || first.applied_at !== Date.parse('2025-01-01T00:00:00Z')) throw new Error('Legacy application not backfilled');
+      if (database.prepare('SELECT application_attempt_id AS id FROM post_application_messages WHERE id = ?').get('mail').id !== first.id) throw new Error('Legacy mail not associated');
+      database.prepare('INSERT INTO application_attempts(id, tenant_id, job_id, sequence, applied_at) VALUES (?, ?, ?, ?, ?)').run('second', 'tenant_default', 'legacy', 2, Date.now());
+      database.prepare('UPDATE post_application_messages SET application_attempt_id = ? WHERE id = ?').run('second', 'mail');
+      database.prepare('INSERT INTO application_email_identities(id, tenant_id, provider, account_key, kind, identity_hash, attempt_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run('binding', 'tenant_default', 'imap', 'account', 'thread', 'hash', 'second');
+      database.close();
+      await import(migrate + '?repeat');
+      database = new Database(path);
+      if (database.prepare('SELECT count(*) AS n FROM application_attempts WHERE job_id = ?').get('legacy').n !== 2) throw new Error('Repeated migration lost attempts');
+      if (database.prepare('SELECT application_attempt_id AS id FROM post_application_messages WHERE id = ?').get('mail').id !== 'second') throw new Error('Repeated migration lost email association');
+      if (database.prepare('SELECT count(*) AS n FROM application_email_identities').get().n !== 1) throw new Error('Repeated migration lost identities');
+      if (database.prepare('SELECT outcome FROM jobs WHERE id = ?').get('legacy').outcome !== 'withdrawn') throw new Error('Migration changed application outcome');
+      database.close();
+    `;
+    execFileSync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", script],
+      { env: { ...process.env, DATA_DIR: tempDir }, stdio: "pipe" },
+    );
+  });
 });

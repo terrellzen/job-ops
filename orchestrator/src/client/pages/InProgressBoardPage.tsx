@@ -10,6 +10,7 @@ import {
   STAGE_LABELS,
   type StageEvent,
 } from "@shared/types.js";
+import { currentAttemptEvents } from "@shared/utils/application-attempts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDownAZ,
@@ -86,7 +87,7 @@ const getCardLeftAccentClass = (stage: ApplicationStage) => {
 const resolveCurrentStage = (
   events: StageEvent[] | null,
 ): { stage: ApplicationStage; latestEventAt: number | null } => {
-  const latest = events?.at(-1) ?? null;
+  const latest = currentAttemptEvents(events ?? []).at(-1) ?? null;
   if (latest) {
     return { stage: latest.toStage, latestEventAt: latest.occurredAt };
   }

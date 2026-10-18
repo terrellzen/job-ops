@@ -1,6 +1,13 @@
-import type { JobListItem, PostApplicationInboxItem } from "@shared/types";
+import type {
+  ApplicationAttempt,
+  JobListItem,
+  PostApplicationInboxItem,
+} from "@shared/types";
+import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, CircleUserRound, XCircle } from "lucide-react";
 import type React from "react";
+import { useState } from "react";
+import { fetchApi } from "@/client/api/core";
 import { Button } from "@/components/ui/button";
 import { SearchableDropdown } from "@/components/ui/searchable-dropdown";
 import { formatDateTime } from "@/lib/utils";
@@ -10,8 +17,10 @@ type EmailViewerRowProps = {
   jobs: JobListItem[];
   selectedAppliedJobId: string;
   onAppliedJobChange: (jobId: string) => void;
-  onApprove: () => void;
-  onDeny: () => void;
+  onDecision: (
+    decision: "approve" | "deny" | "link" | "reopen" | "new_attempt",
+    options?: { applicationAttemptId?: string },
+  ) => void;
   isActionLoading: boolean;
   isAppliedJobsLoading: boolean;
 };
@@ -23,7 +32,8 @@ export type EmailViewerListProps = {
   onAppliedJobChange: (messageId: string, value: string) => void;
   onDecision: (
     item: PostApplicationInboxItem,
-    decision: "approve" | "deny",
+    decision: "approve" | "deny" | "link" | "reopen" | "new_attempt",
+    options?: { applicationAttemptId?: string },
   ) => void;
   isActionLoading: boolean;
   isAppliedJobsLoading: boolean;
@@ -70,14 +80,57 @@ const EmailViewerRow: React.FC<EmailViewerRowProps> = ({
   jobs,
   selectedAppliedJobId,
   onAppliedJobChange,
-  onApprove,
-  onDeny,
+  onDecision,
   isActionLoading,
   isAppliedJobsLoading,
 }) => {
   const score = item.message.matchConfidence;
   const isActionable = item.message.processingStatus === "pending_user";
-  const canDecide = isActionable && !!selectedAppliedJobId;
+  const embeddedAttempts =
+    selectedAppliedJobId === item.message.matchedJobId
+      ? item.attempts
+      : undefined;
+  const attemptsQuery = useQuery({
+    queryKey: ["application-attempts", selectedAppliedJobId],
+    queryFn: () =>
+      fetchApi<{ attempts: ApplicationAttempt[] }>(
+        `/post-application/jobs/${encodeURIComponent(selectedAppliedJobId)}/attempts`,
+      ),
+    enabled: Boolean(selectedAppliedJobId && isActionable && !embeddedAttempts),
+    initialData: embeddedAttempts ? { attempts: embeddedAttempts } : undefined,
+  });
+  const attempts = embeddedAttempts ?? attemptsQuery.data?.attempts ?? [];
+  const [selection, setSelection] = useState<{
+    jobId: string;
+    attemptId: string;
+  } | null>(null);
+  const selectedAttemptId =
+    selection?.jobId === selectedAppliedJobId
+      ? selection.attemptId
+      : selectedAppliedJobId === item.message.matchedJobId
+        ? item.message.applicationAttemptId ||
+          (attempts.length === 1 ? attempts[0].id : "")
+        : attempts.length === 1
+          ? attempts[0].id
+          : "";
+  const selectedAttempt = attempts.find(
+    (attempt) => attempt.id === selectedAttemptId,
+  );
+  const canDecide = isActionable && !!selectedAppliedJobId && !!selectedAttempt;
+  const canStartNew =
+    isActionable && !!selectedAppliedJobId && Boolean(attempts[0]?.closedAt);
+  const reviewReason = item.message.classificationPayload?.attemptReviewReason;
+  const opportunity =
+    reviewReason === "New opportunity on a closed application";
+  const decide = (
+    decision: "approve" | "deny" | "link" | "reopen" | "new_attempt",
+  ) =>
+    onDecision(
+      decision,
+      selectedAttemptId
+        ? { applicationAttemptId: selectedAttemptId }
+        : undefined,
+    );
   const appliedJobOptions = jobs.map((job) => ({
     value: job.id,
     label: formatAppliedJobLabel(job),
@@ -106,6 +159,16 @@ const EmailViewerRow: React.FC<EmailViewerRowProps> = ({
         </div>
 
         <p className="truncate text-sm font-medium">{item.message.subject}</p>
+        {typeof reviewReason === "string" && (
+          <p className="text-xs text-amber-600">{reviewReason}</p>
+        )}
+        {item.message.processingStatus === "auto_linked" &&
+          item.message.classificationPayload?.linkDecision ===
+            "Email linked automatically; application remains closed." && (
+            <p className="text-xs text-muted-foreground">
+              Email linked automatically; application remains closed.
+            </p>
+          )}
         {item.message.matchedJobId ? null : (
           <p className="text-xs text-amber-600">
             Relevant email with no reliable job match. Please select the correct
@@ -114,7 +177,7 @@ const EmailViewerRow: React.FC<EmailViewerRowProps> = ({
         )}
       </div>
 
-      <div className="flex min-w-0 items-center gap-2 lg:ml-auto lg:w-[440px]">
+      <div className="flex min-w-0 flex-wrap items-center gap-2 lg:ml-auto lg:w-[540px]">
         <SearchableDropdown
           value={selectedAppliedJobId}
           options={appliedJobOptions}
@@ -130,18 +193,52 @@ const EmailViewerRow: React.FC<EmailViewerRowProps> = ({
           ariaLabel="Select job"
         />
 
+        {isActionable && selectedAppliedJobId && (
+          <label className="w-full text-xs text-muted-foreground">
+            Application attempt
+            <select
+              className="mt-1 block w-full rounded-md border bg-background p-2 text-sm text-foreground"
+              aria-label="Application attempt"
+              value={selectedAttemptId}
+              onChange={(event) =>
+                setSelection({
+                  jobId: selectedAppliedJobId,
+                  attemptId: event.target.value,
+                })
+              }
+              disabled={isActionLoading}
+            >
+              <option value="">Choose previous or current application…</option>
+              {attempts.map((attempt) => (
+                <option key={attempt.id} value={attempt.id}>
+                  Attempt {attempt.sequence} ·{" "}
+                  {new Date(attempt.appliedAt).toLocaleDateString()} ·{" "}
+                  {attempt.closedAt ? "Closed" : "Active"}
+                  {attempt.applicationReference
+                    ? ` · ${attempt.applicationReference}`
+                    : ""}
+                </option>
+              ))}
+            </select>
+            {attemptsQuery.error && (
+              <span role="alert">
+                Could not load attempts. Refresh to retry.
+              </span>
+            )}
+          </label>
+        )}
         <span
           className={`shrink-0 text-xs tabular-nums ${scoreTextClass(score)}`}
         >
           {score === null ? "n/a" : `${Math.round(score)}%`}
         </span>
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"
             aria-label="Confirm email-job match"
             title="Confirm email-job match"
-            onClick={onApprove}
+            onClick={() => decide("approve")}
             disabled={isActionLoading || !canDecide}
             className="h-8 w-8 p-0"
           >
@@ -150,9 +247,41 @@ const EmailViewerRow: React.FC<EmailViewerRowProps> = ({
           <Button
             size="sm"
             variant="outline"
+            title="Link this email to the selected job without changing its current status"
+            onClick={() => decide("link")}
+            disabled={isActionLoading || !canDecide}
+            className="h-8"
+          >
+            {selectedAttempt?.closedAt ? "Keep closed" : "Link only"}
+          </Button>
+          {opportunity &&
+            selectedAttempt?.closedAt &&
+            selectedAttempt.current && (
+              <Button
+                size="sm"
+                disabled={isActionLoading || !canDecide}
+                onClick={() => decide("reopen")}
+              >
+                Reopen application
+              </Button>
+            )}
+          {canStartNew && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={isActionLoading}
+              title="Start a separate application attempt today and link this email"
+              onClick={() => decide("new_attempt")}
+            >
+              New application
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="outline"
             aria-label="Ignore this match"
             title="Ignore this match"
-            onClick={onDeny}
+            onClick={() => decide("deny")}
             disabled={isActionLoading || !isActionable}
             className="h-8 w-8 p-0"
           >
@@ -190,8 +319,9 @@ export const EmailViewerList: React.FC<EmailViewerListProps> = ({
             onAppliedJobChange={(value) =>
               onAppliedJobChange(item.message.id, value)
             }
-            onApprove={() => onDecision(item, "approve")}
-            onDeny={() => onDecision(item, "deny")}
+            onDecision={(decision, options) =>
+              onDecision(item, decision, options)
+            }
             isActionLoading={isActionLoading}
             isAppliedJobsLoading={isAppliedJobsLoading}
           />

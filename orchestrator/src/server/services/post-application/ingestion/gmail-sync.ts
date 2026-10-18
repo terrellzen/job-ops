@@ -1,5 +1,10 @@
 import { logger } from "@infra/logger";
 import { trackServerProductEvent } from "@infra/product-analytics";
+import { db, schema } from "@server/db";
+import {
+  getScopedAttempt,
+  listApplicationAttempts,
+} from "@server/repositories/application-attempts";
 import { getAllJobs } from "@server/repositories/jobs";
 import {
   getPostApplicationIntegration,
@@ -16,7 +21,17 @@ import {
 } from "@server/repositories/post-application-sync-runs";
 import { transitionStage } from "@server/services/applicationTracking";
 import { resolveStageTransitionForTarget } from "@server/services/post-application/stage-target";
+import { privateDataScopeFilter } from "@server/tenancy/private-scope";
+import { resolveEmailKeywords } from "@shared/email-keywords";
 import type { PostApplicationRouterStageTarget } from "@shared/types";
+import { and, eq } from "drizzle-orm";
+import {
+  bindConfirmedMessage,
+  extractApplicationIdentifiers,
+  resolveEmailAttempt,
+  routeExistingPendingMessages,
+} from "../attempt-routing";
+import { getEmailKeywordFilter } from "./email-keywords";
 import { classifyWithSmartRouter, minifyActiveJobs } from "./email-router";
 import type { GmailCredentials } from "./gmail-api";
 import {
@@ -120,6 +135,7 @@ function normalizeErrorMessage(error: unknown): string {
 
 async function createAutoStageEvent(args: {
   jobId: string;
+  applicationAttemptId?: string | null;
   stageTarget: PostApplicationRouterStageTarget;
   receivedAt: number;
   note: string;
@@ -143,19 +159,46 @@ async function createAutoStageEvent(args: {
       ? "Email received"
       : `Logged from email: ${args.stageTarget}`;
 
-  transitionStage(
-    args.jobId,
-    transition.toStage,
-    Math.floor(args.receivedAt / 1000),
-    {
-      actor: "system",
-      eventType: "status_update",
-      eventLabel,
-      note: args.note,
-      reasonCode: transition.reasonCode ?? "post_application_auto_linked",
-    },
-    transition.outcome,
-  );
+  db.transaction(() => {
+    if (args.applicationAttemptId) {
+      const row = getScopedAttempt(args.applicationAttemptId);
+      if (!row || row.jobId !== args.jobId) return;
+      const attempt = listApplicationAttempts(args.jobId).find(
+        (item) => item.id === row.id,
+      );
+      if (!attempt?.current || attempt.closedAt) return;
+      const newer = db
+        .select()
+        .from(schema.stageEvents)
+        .where(
+          and(
+            privateDataScopeFilter(schema.stageEvents),
+            eq(schema.stageEvents.applicationAttemptId, row.id),
+          ),
+        )
+        .all()
+        .some(
+          (event) =>
+            event.occurredAt * 1000 >= args.receivedAt &&
+            (event.metadata as { eventType?: string } | null)?.eventType !==
+              "note",
+        );
+      if (newer) return;
+    }
+    transitionStage(
+      args.jobId,
+      transition.toStage,
+      Math.floor(args.receivedAt / 1000),
+      {
+        actor: "system",
+        eventType: "status_update",
+        eventLabel,
+        note: args.note,
+        reasonCode: transition.reasonCode ?? "post_application_auto_linked",
+      },
+      transition.outcome,
+    );
+  });
 }
 
 async function runWithConcurrency<T>(
@@ -239,6 +282,7 @@ export async function runGmailIngestionSync(args: {
       accessToken,
       searchDays,
       maxMessages,
+      resolveEmailKeywords(await getEmailKeywordFilter()),
     );
     const activeJobs = await getAllJobs([
       "applied",
@@ -309,9 +353,21 @@ export async function runGmailIngestionSync(args: {
             matched += 1;
           }
 
-          if (autoLinkTransitioned && savedMessage.matchedJobId) {
+          if (
+            savedMessage.applicationAttemptId &&
+            ["auto_linked", "manual_linked"].includes(
+              savedMessage.processingStatus,
+            )
+          )
+            bindConfirmedMessage(savedMessage);
+          if (
+            autoLinkTransitioned &&
+            savedMessage.matchedJobId &&
+            !savedMessage.applicationAttemptId
+          ) {
             await createAutoStageEvent({
               jobId: savedMessage.matchedJobId,
+              applicationAttemptId: savedMessage.applicationAttemptId,
               stageTarget: savedMessage.stageTarget ?? "no_change",
               receivedAt: savedMessage.receivedAt,
               note: "Auto-created from Smart Router.",
@@ -337,7 +393,35 @@ export async function runGmailIngestionSync(args: {
           routerResult.bestMatchId && activeJobIds.has(routerResult.bestMatchId)
             ? routerResult.bestMatchId
             : null;
-        const isAutoLinked = routerResult.confidence >= 95 && matchedJobId;
+        const emailIdentity = {
+          messageId: headerValue(metadata.headers, "Message-ID") || undefined,
+          threadId: metadata.threadId,
+          references: [
+            headerValue(metadata.headers, "References"),
+            headerValue(metadata.headers, "In-Reply-To"),
+          ]
+            .join(" ")
+            .match(/<[^>]+>/g)
+            ?.slice(-20),
+          ...extractApplicationIdentifiers(`${subject}\n${body}`),
+        };
+        const routing = await resolveEmailAttempt({
+          provider: "gmail",
+          accountKey: args.accountKey,
+          suggestedJobId: matchedJobId,
+          confidence: routerResult.confidence,
+          receivedAt,
+          stageTarget: routerResult.stageTarget,
+          identity: emailIdentity,
+          isRelevant: routerResult.isRelevant,
+          stageEventPayload: routerResult.stageEventPayload,
+        });
+        const isAutoLinked =
+          routing.automaticClosedLink ||
+          (routerResult.confidence >= 95 &&
+            routing.attempt &&
+            !routing.preserveStatus &&
+            !routing.reviewReason);
         const isPendingMatch = routerResult.confidence >= 50;
         const isRelevantOrphan = routerResult.isRelevant;
         const processingStatus = resolveProcessingStatus({
@@ -350,6 +434,9 @@ export async function runGmailIngestionSync(args: {
           await upsertPostApplicationMessage({
             provider: "gmail",
             accountKey: args.accountKey,
+            applicationAttemptId: routing.attempt?.id ?? null,
+            decidedAt: routing.automaticClosedLink ? Date.now() : null,
+            decidedBy: routing.automaticClosedLink ? "system" : null,
             integrationId: integration.id,
             syncRunId: syncRun.id,
             externalMessageId: metadata.id,
@@ -364,6 +451,13 @@ export async function runGmailIngestionSync(args: {
             classificationConfidence: routerResult.confidence / 100,
             classificationPayload: {
               method: "smart_router",
+              emailIdentity,
+              attemptMatchConfidence: routing.confidence,
+              attemptSequence: routing.attempt?.sequence ?? null,
+              attemptReviewReason: routing.reviewReason,
+              linkDecision: routing.automaticClosedLink
+                ? "Email linked automatically; application remains closed."
+                : null,
               reason: routerResult.reason,
               stageTarget: routerResult.stageTarget,
             },
@@ -371,7 +465,7 @@ export async function runGmailIngestionSync(args: {
             relevanceDecision: routerResult.isRelevant
               ? "relevant"
               : "not_relevant",
-            matchedJobId: isAutoLinked || isPendingMatch ? matchedJobId : null,
+            matchedJobId: routing.jobId,
             matchConfidence: routerResult.confidence,
             stageTarget: routerResult.stageTarget,
             messageType: routerResult.messageType,
@@ -387,9 +481,19 @@ export async function runGmailIngestionSync(args: {
           matched += 1;
         }
 
-        if (autoLinkTransitioned && savedMessage.matchedJobId) {
+        if (
+          savedMessage.applicationAttemptId &&
+          savedMessage.processingStatus === "auto_linked"
+        )
+          bindConfirmedMessage(savedMessage);
+        if (
+          autoLinkTransitioned &&
+          savedMessage.matchedJobId &&
+          !routing.preserveStatus
+        ) {
           await createAutoStageEvent({
             jobId: savedMessage.matchedJobId,
+            applicationAttemptId: savedMessage.applicationAttemptId,
             stageTarget: savedMessage.stageTarget ?? "no_change",
             receivedAt: savedMessage.receivedAt,
             note: "Auto-created from Smart Router.",
@@ -407,6 +511,7 @@ export async function runGmailIngestionSync(args: {
       }
     });
 
+    await routeExistingPendingMessages("gmail", args.accountKey);
     await completePostApplicationSyncRun({
       id: syncRun.id,
       status: "completed",

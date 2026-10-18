@@ -65,6 +65,7 @@ import { formatUserFacingError } from "@/client/lib/error-format";
 import { showErrorToast } from "@/client/lib/error-toast";
 import { queryKeys } from "@/client/lib/queryKeys";
 import { Button } from "@/components/ui/button";
+import { EmailAccountsSection } from "./settings/components/EmailAccountsSection";
 
 const DEFAULT_FORM_VALUES: UpdateSettingsInput = {
   model: "",
@@ -129,6 +130,7 @@ const EMPTY_RXRESUME_VALIDATION_BADGE_STATE: RxResumeValidationBadgeState = {
 };
 
 type SettingsSectionId =
+  | "email-accounts"
   | "billing"
   | "model"
   | "chat"
@@ -232,6 +234,13 @@ const SETTINGS_NAV_GROUPS: SettingsNavGroup[] = [
     label: "Integrations",
     items: [
       {
+        id: "email-accounts",
+        label: "Email Accounts",
+        description:
+          "IMAP connections, mailbox settings, and application updates.",
+        searchTerms: ["email", "imap", "gmail", "outlook", "mailbox"],
+      },
+      {
         id: "reactive-resume",
         label: "Reactive Resume",
         description: "Resume sync, templates, and project selection.",
@@ -306,6 +315,7 @@ const SECTION_FIELD_MAP: Record<
   Array<keyof UpdateSettingsInput>
 > = {
   billing: [],
+  "email-accounts": [],
   model: [
     "llmProvider",
     "llmBaseUrl",
@@ -1629,6 +1639,9 @@ export const SettingsPage: React.FC = () => {
 
   let activeSectionContent: React.ReactNode;
   switch (activeSection) {
+    case "email-accounts":
+      activeSectionContent = <EmailAccountsSection />;
+      break;
     case "billing":
       activeSectionContent = (
         <BillingSettingsSection
@@ -1819,7 +1832,8 @@ export const SettingsPage: React.FC = () => {
                 : null
             }
             actions={
-              activeSection === "billing" ? null : (
+              activeSection === "billing" ||
+              activeSection === "email-accounts" ? null : (
                 <>
                   {activeSectionIsDirty ? (
                     <Button

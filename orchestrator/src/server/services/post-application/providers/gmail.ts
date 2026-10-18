@@ -7,6 +7,7 @@ import {
 import { runGmailIngestionSync } from "@server/services/post-application/ingestion/gmail-sync";
 import type { PostApplicationIntegration } from "@shared/types";
 import { providerInvalidRequest, providerUpstreamError } from "./errors";
+import { assertMailboxAvailable } from "./imap";
 import type {
   PostApplicationProviderActionResult,
   PostApplicationProviderAdapter,
@@ -144,6 +145,8 @@ export const gmailProvider: PostApplicationProviderAdapter = {
     args: PostApplicationProviderConnectArgs,
   ): Promise<PostApplicationProviderActionResult> {
     const credentials = parseGmailCredentials(args);
+    if (credentials.email)
+      await assertMailboxAvailable(credentials.email, "gmail", args.accountKey);
     const displayName =
       credentials.displayName ??
       credentials.email ??

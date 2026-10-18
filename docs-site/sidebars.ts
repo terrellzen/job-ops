@@ -9,6 +9,8 @@ const sidebars: SidebarsConfig = {
       items: [
         "getting-started/self-hosting",
         "getting-started/gmail-oauth-setup",
+        "getting-started/imap-email-setup",
+        "getting-started/email-search-keywords",
       ],
     },
     {
@@ -36,6 +38,7 @@ const sidebars: SidebarsConfig = {
         "features/in-progress-board",
         "features/ghostwriter",
         "features/post-application-tracking",
+        "features/application-attempts",
         "features/visa-sponsors",
         "features/tracer-links",
         "features/watchlist",

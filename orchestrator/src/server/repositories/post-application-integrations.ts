@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+  decryptImapCredentials,
+  encryptImapCredentials,
+} from "@server/services/post-application/providers/imap-credentials";
 import type {
   PostApplicationIntegration,
   PostApplicationIntegrationStatus,
@@ -51,7 +55,13 @@ function mapRowToIntegration(
     accountKey: row.accountKey,
     displayName: row.displayName,
     status: row.status as PostApplicationIntegrationStatus,
-    credentials: asCredentials(row.credentials),
+    credentials:
+      row.provider === "imap" && row.credentials
+        ? decryptImapCredentials(
+            asCredentials(row.credentials) ?? {},
+            row.accountKey,
+          )
+        : asCredentials(row.credentials),
     lastConnectedAt: row.lastConnectedAt,
     lastSyncedAt: row.lastSyncedAt,
     lastError: row.lastError,
@@ -95,12 +105,20 @@ export async function upsertConnectedPostApplicationIntegration(
       .set({
         displayName: input.displayName ?? existing.displayName,
         status: "connected",
-        credentials: input.credentials,
+        credentials:
+          input.provider === "imap"
+            ? encryptImapCredentials(input.credentials, input.accountKey)
+            : input.credentials,
         lastConnectedAt: nowEpoch,
         lastError: null,
         updatedAt: nowIso,
       })
-      .where(eq(postApplicationIntegrations.id, existing.id));
+      .where(
+        and(
+          integrationsScopeFilter(),
+          eq(postApplicationIntegrations.id, existing.id),
+        ),
+      );
 
     const updated = await getPostApplicationIntegration(
       input.provider,
@@ -123,7 +141,10 @@ export async function upsertConnectedPostApplicationIntegration(
     accountKey: input.accountKey,
     displayName: input.displayName ?? null,
     status: "connected",
-    credentials: input.credentials,
+    credentials:
+      input.provider === "imap"
+        ? encryptImapCredentials(input.credentials, input.accountKey)
+        : input.credentials,
     lastConnectedAt: nowEpoch,
     lastError: null,
     createdAt: nowIso,
@@ -146,7 +167,16 @@ export async function disconnectPostApplicationIntegration(
   provider: PostApplicationProvider,
   accountKey: string,
 ): Promise<PostApplicationIntegration | null> {
-  const existing = await getPostApplicationIntegration(provider, accountKey);
+  const [existing] = await db
+    .select()
+    .from(postApplicationIntegrations)
+    .where(
+      and(
+        integrationsScopeFilter(),
+        eq(postApplicationIntegrations.provider, provider),
+        eq(postApplicationIntegrations.accountKey, accountKey),
+      ),
+    );
   if (!existing) return null;
 
   const nowIso = new Date().toISOString();
@@ -187,7 +217,12 @@ export async function updatePostApplicationIntegrationSyncState(
         : {}),
       ...(input.lastError !== undefined ? { lastError: input.lastError } : {}),
       ...(input.credentials !== undefined
-        ? { credentials: input.credentials }
+        ? {
+            credentials:
+              input.provider === "imap" && input.credentials
+                ? encryptImapCredentials(input.credentials, input.accountKey)
+                : input.credentials,
+          }
         : {}),
       updatedAt: nowIso,
     })
@@ -199,4 +234,43 @@ export async function updatePostApplicationIntegrationSyncState(
     );
 
   return getPostApplicationIntegration(input.provider, input.accountKey);
+}
+
+export async function listPostApplicationIntegrations(): Promise<
+  PostApplicationIntegration[]
+> {
+  const rows = await db
+    .select()
+    .from(postApplicationIntegrations)
+    .where(integrationsScopeFilter());
+  return rows.map((row) => {
+    try {
+      return mapRowToIntegration(row);
+    } catch (error) {
+      if (row.provider !== "imap") throw error;
+      return {
+        ...mapRowToIntegration({ ...row, credentials: null }),
+        status: "error" as const,
+        lastError:
+          "IMAP credentials could not be decrypted. Restore EMAIL_CREDENTIALS_KEY, or remove and reconnect this account.",
+      };
+    }
+  });
+}
+
+// System scheduler enumerates identities only; private data is loaded within restored scope.
+export async function listImapAccountOwners() {
+  return db
+    .select({
+      tenantId: postApplicationIntegrations.tenantId,
+      userId: postApplicationIntegrations.userId,
+      accountKey: postApplicationIntegrations.accountKey,
+    })
+    .from(postApplicationIntegrations)
+    .where(
+      and(
+        eq(postApplicationIntegrations.provider, "imap"),
+        eq(postApplicationIntegrations.status, "connected"),
+      ),
+    );
 }

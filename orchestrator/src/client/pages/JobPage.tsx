@@ -8,6 +8,7 @@ import {
   STAGE_LABELS,
   type StageEvent,
 } from "@shared/types.js";
+import { currentAttemptEvents } from "@shared/utils/application-attempts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -78,6 +79,7 @@ import {
 } from "../components/LogEventModal";
 import { getDeleteEventDescription } from "./job/deleteEventDescription";
 import { JobTimeline } from "./job/Timeline";
+import { ApplicationAttemptsPanel } from "./job-page/ApplicationAttemptsPanel";
 import { JobDocumentsPanel } from "./job-page/JobDocumentsPanel";
 import { JobEmailsPanel } from "./job-page/JobEmailsPanel";
 import { JobNotesCard } from "./job-page/JobNotesCard";
@@ -203,6 +205,7 @@ export const JobPage: React.FC = () => {
 
   const job = jobQuery.data ?? null;
   const events = mergeEvents(eventsQuery.data ?? [], pendingEventRef.current);
+  const activeAttemptEvents = currentAttemptEvents(events);
   const notes = React.useMemo(
     () => sortNotesByUpdatedAtDesc(notesQuery.data ?? []),
     [notesQuery.data],
@@ -309,7 +312,7 @@ export const JobPage: React.FC = () => {
       return;
     }
 
-    const currentStage = events.at(-1)?.toStage ?? "applied";
+    const currentStage = activeAttemptEvents.at(-1)?.toStage ?? "applied";
 
     try {
       const { effectiveStage, newEvent } = await logJobStageEvent({
@@ -483,7 +486,7 @@ export const JobPage: React.FC = () => {
   };
 
   const currentStage = job
-    ? (events.at(-1)?.toStage ??
+    ? (activeAttemptEvents.at(-1)?.toStage ??
       (job.status === "applied" || job.status === "in_progress"
         ? "applied"
         : null))
@@ -505,7 +508,7 @@ export const JobPage: React.FC = () => {
   const isReady = job?.status === "ready";
   const baseJobPath = id ? `/job/${id}` : "";
   const latestNote = notes[0] ?? null;
-  const latestEvent = events.at(-1) ?? null;
+  const latestEvent = activeAttemptEvents.at(-1) ?? null;
   const latestEventTitle =
     latestEvent?.metadata?.eventLabel || latestEvent?.title || null;
   const jobDescriptionPreview = summarizeMemoryText(job?.jobDescription, 260);
@@ -851,7 +854,12 @@ export const JobPage: React.FC = () => {
               </section>
             )}
 
-            {activeMemoryView === "emails" && <JobEmailsPanel jobId={job.id} />}
+            {activeMemoryView === "emails" && (
+              <div className="space-y-4">
+                <ApplicationAttemptsPanel jobId={job.id} />
+                <JobEmailsPanel jobId={job.id} />
+              </div>
+            )}
 
             {activeMemoryView === "ghostwriter" && (
               <section className="">

@@ -2,7 +2,19 @@ import type { PostApplicationIntegration } from "@shared/types";
 import type { Mock } from "vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("../ingestion/imap-client", () => ({
+  withImapConnection: vi
+    .fn()
+    .mockImplementation(
+      async (
+        _config: unknown,
+        operation: (client: unknown) => Promise<unknown>,
+      ) => operation({ mailboxOpen: vi.fn().mockResolvedValue({}) }),
+    ),
+}));
+
 vi.mock("@server/repositories/post-application-integrations", () => ({
+  listPostApplicationIntegrations: vi.fn().mockResolvedValue([]),
   getPostApplicationIntegration: vi.fn().mockResolvedValue(null),
   upsertConnectedPostApplicationIntegration: vi.fn().mockImplementation(
     async ({
@@ -65,11 +77,18 @@ import { executePostApplicationProviderAction } from "./service";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(integrationRepo.getPostApplicationIntegration).mockResolvedValue(
+    null,
+  );
+  vi.mocked(integrationRepo.listPostApplicationIntegrations).mockResolvedValue(
+    [],
+  );
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200 }));
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -209,7 +228,7 @@ describe("post-application provider action dispatcher", () => {
     });
   });
 
-  it("maps IMAP not-implemented errors to service unavailable app errors", async () => {
+  it("rejects IMAP connections without valid settings", async () => {
     await expect(
       executePostApplicationProviderAction({
         provider: "imap",
@@ -217,11 +236,65 @@ describe("post-application provider action dispatcher", () => {
         accountKey: "account:imap:test",
       }),
     ).rejects.toMatchObject({
-      status: 503,
-      code: "SERVICE_UNAVAILABLE",
-      message:
-        "IMAP provider is not implemented yet for account 'account:imap:test'.",
+      status: 400,
+      code: "INVALID_REQUEST",
     });
+  });
+
+  it("tests and saves IMAP configuration without returning the saved password", async () => {
+    vi.stubEnv("EMAIL_CREDENTIALS_KEY", "ab".repeat(32));
+    const response = await executePostApplicationProviderAction({
+      provider: "imap",
+      action: "connect",
+      accountKey: "work",
+      connectPayload: {
+        payload: {
+          email: "test@example.com",
+          host: "imap.example.com",
+          username: "test@example.com",
+          password: "private-password",
+        },
+      },
+    });
+    expect(response.status.connected).toBe(true);
+    expect(response.status.integration?.credentials).toMatchObject({
+      hasPassword: true,
+      host: "imap.example.com",
+    });
+    expect(JSON.stringify(response)).not.toContain("private-password");
+  });
+
+  it("prevents connecting a Gmail mailbox already configured through IMAP", async () => {
+    vi.mocked(
+      integrationRepo.listPostApplicationIntegrations,
+    ).mockResolvedValue([
+      {
+        id: "imap",
+        provider: "imap",
+        accountKey: "one",
+        status: "connected",
+        credentials: { email: "test@example.com" },
+        displayName: null,
+        lastConnectedAt: null,
+        lastSyncedAt: null,
+        lastError: null,
+        createdAt: "2026-01-01",
+        updatedAt: "2026-01-01",
+      },
+    ]);
+    await expect(
+      executePostApplicationProviderAction({
+        provider: "gmail",
+        action: "connect",
+        accountKey: "two",
+        connectPayload: {
+          payload: { refreshToken: "secret", email: "test@example.com" },
+        },
+      }),
+    ).rejects.toMatchObject({ status: 409, code: "CONFLICT" });
+    expect(
+      integrationRepo.upsertConnectedPostApplicationIntegration,
+    ).not.toHaveBeenCalled();
   });
 
   it("maps upstream provider errors to upstream app errors", () => {

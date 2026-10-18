@@ -92,6 +92,8 @@ export interface StageEventMetadata {
 }
 
 export interface StageEvent {
+  applicationAttemptId?: string | null;
+  attemptSequence?: number;
   id: string;
   applicationId: string;
   title: string;

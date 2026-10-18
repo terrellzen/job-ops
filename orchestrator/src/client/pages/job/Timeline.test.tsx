@@ -33,6 +33,30 @@ const expectTextBefore = (leftText: string, rightText: string) => {
 };
 
 describe("JobTimeline", () => {
+  it("labels separate application attempts even when an old event was edited later", () => {
+    render(
+      <JobTimeline
+        events={[
+          makeEvent({
+            id: "current",
+            title: "New application",
+            attemptSequence: 2,
+            occurredAt: 10,
+          }),
+          makeEvent({
+            id: "old",
+            title: "Old closure",
+            attemptSequence: 1,
+            toStage: "closed",
+            occurredAt: 20,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText("Attempt 1")).toBeInTheDocument();
+    expect(screen.getByText("Attempt 2")).toBeInTheDocument();
+  });
+
   it("renders a read-only Discovered entry when discoveredAt exists without stage events", () => {
     render(<JobTimeline events={[]} discoveredAt="2024-12-31T09:30:00.000Z" />);
 

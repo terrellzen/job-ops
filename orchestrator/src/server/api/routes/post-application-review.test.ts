@@ -22,6 +22,8 @@ describe.sequential("Post-Application Review Workflow API", () => {
   });
 
   async function seedPendingMessage(input?: {
+    provider?: "gmail" | "imap";
+    receivedAt?: number;
     syncRunId?: string | null;
     matchedJobId?: string | null;
     stageTarget?: PostApplicationRouterStageTarget;
@@ -42,7 +44,7 @@ describe.sequential("Post-Application Review Workflow API", () => {
     });
 
     const { message } = await upsertPostApplicationMessage({
-      provider: "gmail",
+      provider: input?.provider ?? "gmail",
       accountKey: "default",
       integrationId: null,
       syncRunId: input?.syncRunId ?? null,
@@ -51,7 +53,7 @@ describe.sequential("Post-Application Review Workflow API", () => {
       fromDomain: "smartrecruiters.com",
       senderName: "Roku",
       subject: "Interview invitation",
-      receivedAt: Date.now(),
+      receivedAt: input?.receivedAt ?? Date.now(),
       snippet: "Please schedule an interview.",
       classificationLabel: "interview",
       classificationConfidence: 0.97,
@@ -74,6 +76,254 @@ describe.sequential("Post-Application Review Workflow API", () => {
 
     return { message, jobId: job.id };
   }
+
+  it("blocks older IMAP suggestions from overwriting newer confirmed stages", async () => {
+    const { message, jobId } = await seedPendingMessage({
+      provider: "imap",
+      receivedAt: Date.now() - 60000,
+    });
+    const { transitionStage } = await import(
+      "@server/services/applicationTracking"
+    );
+    transitionStage(jobId, "offer", Math.floor(Date.now() / 1000), {
+      actor: "user",
+    });
+    const res = await fetch(
+      `${baseUrl}/api/post-application/inbox/${message.id}/approve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "imap", accountKey: "default" }),
+      },
+    );
+    expect(res.status).toBe(409);
+    const { getPostApplicationMessageById } = await import(
+      "@server/repositories/post-application-messages"
+    );
+    expect(
+      (await getPostApplicationMessageById(message.id))?.processingStatus,
+    ).toBe("pending_user");
+    const link = await fetch(
+      `${baseUrl}/api/post-application/inbox/${message.id}/approve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "imap",
+          accountKey: "default",
+          stageTarget: "no_change",
+        }),
+      },
+    );
+    expect(link.status).toBe(200);
+  });
+
+  it("links an older confirmation of the current stage without rewriting its date", async () => {
+    const receivedAt = Date.now() - 13000;
+    const { message, jobId } = await seedPendingMessage({
+      provider: "imap",
+      receivedAt,
+      stageTarget: "applied",
+    });
+    const { transitionStage, getStageEvents } = await import(
+      "@server/services/applicationTracking"
+    );
+    const event = transitionStage(
+      jobId,
+      "applied",
+      Math.floor(Date.now() / 1000),
+      { actor: "system" },
+    );
+    const res = await fetch(
+      `${baseUrl}/api/post-application/inbox/${message.id}/approve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "imap", accountKey: "default" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data.message.processingStatus).toBe("manual_linked");
+    expect(body.data.stageEventId).toBeNull();
+    expect(await getStageEvents(jobId)).toEqual([event]);
+  });
+
+  it("does not mistake a newer note for a confirmed stage update", async () => {
+    const receivedAt = Date.now() - 60000;
+    const { message, jobId } = await seedPendingMessage({
+      provider: "imap",
+      receivedAt,
+      stageTarget: "rejected",
+    });
+    const { transitionStage } = await import(
+      "@server/services/applicationTracking"
+    );
+    transitionStage(jobId, "applied", Math.floor(receivedAt / 1000) - 100, {
+      actor: "user",
+    });
+    transitionStage(jobId, "no_change", Math.floor(Date.now() / 1000), {
+      actor: "user",
+      eventType: "note",
+      note: "Reviewed tracking",
+    });
+    const res = await fetch(
+      `${baseUrl}/api/post-application/inbox/${message.id}/approve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "imap", accountKey: "default" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const { getJobById } = await import("@server/repositories/jobs");
+    expect((await getJobById(jobId))?.outcome).toBe("rejected");
+  });
+
+  it("links a historical rejection without changing a closed withdrawal outcome", async () => {
+    const { message, jobId } = await seedPendingMessage({
+      provider: "imap",
+      receivedAt: Date.now() - 60000,
+      stageTarget: "rejected",
+    });
+    const { transitionStage } = await import(
+      "@server/services/applicationTracking"
+    );
+    transitionStage(
+      jobId,
+      "closed",
+      Math.floor(Date.now() / 1000),
+      { actor: "user" },
+      "withdrawn",
+    );
+    const res = await fetch(
+      `${baseUrl}/api/post-application/inbox/${message.id}/approve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "imap", accountKey: "default" }),
+      },
+    );
+    expect(res.status).toBe(200);
+    const { getJobById } = await import("@server/repositories/jobs");
+    expect((await getJobById(jobId))?.outcome).toBe("withdrawn");
+  });
+
+  it("ignores newer events belonging to a different tenant when reviewing an email", async () => {
+    const { message, jobId } = await seedPendingMessage({
+      provider: "imap",
+      receivedAt: Date.now() - 60000,
+    });
+    const { db, schema } = await import("@server/db");
+    await db
+      .insert(schema.tenants)
+      .values({ id: "review-other", name: "Other", slug: "review-other" });
+    await db.insert(schema.stageEvents).values({
+      id: randomUUID(),
+      tenantId: "review-other",
+      applicationId: jobId,
+      title: "Other tenant update",
+      toStage: "offer",
+      occurredAt: Math.floor(Date.now() / 1000),
+    });
+    const res = await fetch(
+      `${baseUrl}/api/post-application/inbox/${message.id}/approve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "imap", accountKey: "default" }),
+      },
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("starts a new application attempt through the scoped API and preserves previous history", async () => {
+    const { jobId } = await seedPendingMessage();
+    const { transitionStage } = await import(
+      "@server/services/applicationTracking"
+    );
+    transitionStage(jobId, "applied", Math.floor(Date.now() / 1000) - 1000, {
+      actor: "user",
+    });
+    transitionStage(
+      jobId,
+      "closed",
+      Math.floor(Date.now() / 1000) - 500,
+      { actor: "user" },
+      "withdrawn",
+    );
+    const response = await fetch(
+      `${baseUrl}/api/post-application/jobs/${jobId}/attempts`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-request-id": "attempt-correlation",
+        },
+        body: JSON.stringify({
+          appliedAt: Date.now(),
+          applicationReference: "APP-NEW",
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-request-id")).toBe("attempt-correlation");
+    const body = await response.json();
+    expect(body.meta.requestId).toBe("attempt-correlation");
+    expect(body.data.attempts).toHaveLength(2);
+    expect(body.data.attempts[0]).toMatchObject({
+      sequence: 2,
+      stage: "applied",
+      applicationReference: "APP-NEW",
+      outcome: null,
+    });
+    expect(body.data.attempts[1]).toMatchObject({
+      sequence: 1,
+      stage: "closed",
+      outcome: "withdrawn",
+    });
+    const again = await fetch(
+      `${baseUrl}/api/post-application/jobs/${jobId}/attempts`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appliedAt: Date.now() }),
+      },
+    );
+    expect(again.status).toBe(409);
+  });
+  it("validates attempt dates and keeps other tenants' attempts private", async () => {
+    const { jobId } = await seedPendingMessage();
+    const future = await fetch(
+      `${baseUrl}/api/post-application/jobs/${jobId}/attempts`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appliedAt: Date.now() + 86400000 }),
+      },
+    );
+    expect(future.status).toBe(400);
+    const { db, schema } = await import("@server/db");
+    const { runWithRequestContext } = await import("@infra/request-context");
+    const { createJob } = await import("@server/repositories/jobs");
+    await db
+      .insert(schema.tenants)
+      .values({ id: "private-other", name: "Other", slug: "private-other" });
+    const other = await runWithRequestContext(
+      { tenantId: "private-other" },
+      () =>
+        createJob({
+          source: "manual",
+          title: "Engineer",
+          employer: "Other",
+          jobUrl: `https://example.com/${randomUUID()}`,
+        }),
+    );
+    const response = await fetch(
+      `${baseUrl}/api/post-application/jobs/${other.id}/attempts`,
+    );
+    expect(response.status).toBe(404);
+  });
 
   it("lists pending inbox items", async () => {
     const { message } = await seedPendingMessage();

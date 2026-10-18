@@ -1544,6 +1544,10 @@ function ensureTracerLinksUniqueIndex(): void {
 }
 
 function rebuildPostApplicationPrivateTables(): void {
+  // This legacy rebuild copies a fixed set of columns. Attempt-aware tables
+  // have already received the private schema and must retain their new links.
+  if (tableHasColumn("post_application_messages", "application_attempt_id"))
+    return;
   if (
     !tableExists("post_application_integrations") ||
     !tableExists("post_application_messages") ||
@@ -1817,6 +1821,73 @@ sqlite.exec(
 sqlite.exec(
   "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id)",
 );
+
+// Additive, restart-safe application-attempt migration. Preserve all existing histories.
+const attemptsWerePresent = tableExists("application_attempts");
+sqlite.transaction(() => {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS application_attempts (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL, applied_at INTEGER NOT NULL,
+      application_reference TEXT, requisition_id TEXT, stage_snapshot TEXT NOT NULL DEFAULT 'applied', outcome_snapshot TEXT, closed_at_snapshot INTEGER
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_application_attempt_job_sequence ON application_attempts(job_id, sequence);
+    CREATE TABLE IF NOT EXISTS application_email_identities (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT REFERENCES users(id) ON DELETE CASCADE, provider TEXT NOT NULL,
+      account_key TEXT NOT NULL, kind TEXT NOT NULL, identity_hash TEXT NOT NULL,
+      attempt_id TEXT NOT NULL REFERENCES application_attempts(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_application_email_identity ON application_email_identities(tenant_id, coalesce(user_id, ''), provider, account_key, kind, identity_hash);
+  `);
+  for (const [column, definition] of [
+    ["stage_snapshot", "TEXT NOT NULL DEFAULT 'applied'"],
+    ["outcome_snapshot", "TEXT"],
+    ["closed_at_snapshot", "INTEGER"],
+  ]) {
+    if (!tableHasColumn("application_attempts", column))
+      sqlite.exec(
+        `ALTER TABLE application_attempts ADD COLUMN ${column} ${definition}`,
+      );
+  }
+  for (const table of ["stage_events", "post_application_messages"]) {
+    if (!tableHasColumn(table, "application_attempt_id"))
+      sqlite.exec(
+        `ALTER TABLE ${table} ADD COLUMN application_attempt_id TEXT REFERENCES application_attempts(id) ON DELETE SET NULL`,
+      );
+  }
+  backfillUserFromParent({
+    tableName: "application_attempts",
+    parentTableName: "jobs",
+    localColumnName: "job_id",
+    parentColumnName: "id",
+  });
+  backfillUserFromParent({
+    tableName: "application_email_identities",
+    parentTableName: "application_attempts",
+    localColumnName: "attempt_id",
+    parentColumnName: "id",
+  });
+  if (!attemptsWerePresent)
+    sqlite.exec(`
+    INSERT OR IGNORE INTO application_attempts(id, tenant_id, user_id, job_id, sequence, applied_at, stage_snapshot, outcome_snapshot, closed_at_snapshot)
+    SELECT 'initial:' || j.id, j.tenant_id, j.user_id, j.id, 1,
+      coalesce(cast(strftime('%s', j.applied_at) AS INTEGER) * 1000,
+        (SELECT min(occurred_at) * 1000 FROM stage_events WHERE application_id = j.id),
+        cast(strftime('%s', j.discovered_at) AS INTEGER) * 1000, 0),
+      CASE WHEN j.closed_at IS NOT NULL THEN 'closed' ELSE 'applied' END, j.outcome, j.closed_at * 1000
+    FROM jobs j WHERE j.applied_at IS NOT NULL OR j.status IN ('applied', 'in_progress')
+      OR EXISTS (SELECT 1 FROM stage_events WHERE application_id = j.id)
+      OR EXISTS (SELECT 1 FROM post_application_messages WHERE matched_job_id = j.id);
+    UPDATE stage_events SET application_attempt_id = 'initial:' || application_id
+      WHERE application_attempt_id IS NULL AND EXISTS (SELECT 1 FROM application_attempts WHERE id = 'initial:' || application_id);
+    UPDATE post_application_messages SET application_attempt_id = 'initial:' || matched_job_id
+      WHERE application_attempt_id IS NULL AND matched_job_id IS NOT NULL
+      AND EXISTS (SELECT 1 FROM application_attempts WHERE id = 'initial:' || matched_job_id);
+  `);
+})();
 
 sqlite.close();
 console.log("🎉 Database migrations complete!");

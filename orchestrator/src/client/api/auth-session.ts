@@ -123,6 +123,16 @@ export function getCurrentAuthWorkspaceStorageScope(): string | null {
   return tenantId ? `workspace:${tenantId}` : null;
 }
 
+export function getCurrentAuthUserStorageScope(): string | null {
+  const token = loadStoredAuthToken();
+  const segment = token?.split(".")[1];
+  const payload = segment ? decodeBase64UrlJsonSegment(segment) : null;
+  const tenantId = getTenantIdFromAuthToken(token);
+  const userId = payload?.userId ?? payload?.sub;
+  if (!tenantId || typeof userId !== "string" || !userId.trim()) return null;
+  return `workspace:${encodeURIComponent(tenantId)}:user:${encodeURIComponent(userId)}`;
+}
+
 export function getAuthScopedStorageKey(baseKey: string): string {
   const scope = getCurrentAuthWorkspaceStorageScope();
   return scope ? `${baseKey}:${scope}` : baseKey;

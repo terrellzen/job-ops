@@ -313,6 +313,61 @@ export const jobs = sqliteTable(
   }),
 );
 
+export const applicationAttempts = sqliteTable(
+  "application_attempts",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    appliedAt: integer("applied_at").notNull(),
+    applicationReference: text("application_reference"),
+    requisitionId: text("requisition_id"),
+    stageSnapshot: text("stage_snapshot").notNull().default("applied"),
+    outcomeSnapshot: text("outcome_snapshot"),
+    closedAtSnapshot: integer("closed_at_snapshot"),
+  },
+  (table) => ({
+    jobSequence: uniqueIndex("idx_application_attempt_job_sequence").on(
+      table.jobId,
+      table.sequence,
+    ),
+  }),
+);
+
+export const applicationEmailIdentities = sqliteTable(
+  "application_email_identities",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    accountKey: text("account_key").notNull(),
+    kind: text("kind").notNull(),
+    identityHash: text("identity_hash").notNull(),
+    attemptId: text("attempt_id")
+      .notNull()
+      .references(() => applicationAttempts.id, { onDelete: "cascade" }),
+  },
+  (table) => ({
+    scopedIdentity: uniqueIndex("idx_application_email_identity").on(
+      table.tenantId,
+      sql`coalesce(${table.userId}, '')`,
+      table.provider,
+      table.accountKey,
+      table.kind,
+      table.identityHash,
+    ),
+  }),
+);
+
 export const stageEvents = sqliteTable("stage_events", {
   id: text("id").primaryKey(),
   tenantId: text("tenant_id")
@@ -325,6 +380,10 @@ export const stageEvents = sqliteTable("stage_events", {
   applicationId: text("application_id")
     .notNull()
     .references(() => jobs.id, { onDelete: "cascade" }),
+  applicationAttemptId: text("application_attempt_id").references(
+    () => applicationAttempts.id,
+    { onDelete: "set null" },
+  ),
   title: text("title").notNull(),
   groupId: text("group_id"),
   fromStage: text("from_stage", { enum: APPLICATION_STAGES }),
@@ -940,6 +999,10 @@ export const postApplicationMessages = sqliteTable(
       {
         onDelete: "set null",
       },
+    ),
+    applicationAttemptId: text("application_attempt_id").references(
+      () => applicationAttempts.id,
+      { onDelete: "set null" },
     ),
     externalMessageId: text("external_message_id").notNull(),
     externalThreadId: text("external_thread_id"),

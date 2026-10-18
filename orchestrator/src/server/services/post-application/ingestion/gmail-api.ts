@@ -149,118 +149,27 @@ export async function gmailApi<T>(token: string, url: string): Promise<T> {
   return data as T;
 }
 
-export function buildGmailQuery(searchDays: number): string {
-  const subjectTerms = [
-    "application",
-    "thank you for applying",
-    "thanks for applying",
-    "application received",
-    "application submitted",
-    "your application",
-    "interview",
-    "assessment",
-    "coding challenge",
-    "take-home",
-    "availability",
-    "offer",
-    "offer letter",
-    "referral",
-    "recruiter",
-    "hiring team",
-    "regret to inform",
-    "not moving forward",
-    "not selected",
-    "application unsuccessful",
-    "moving forward with other candidates",
-    "unable to proceed",
-    "position has been filled",
-    "hiring freeze",
-    "position on hold",
-    "withdrawn",
-    // Interview scheduling / calendar coordination
-    "invitation",
-    "updated invitation",
-    "reschedule",
-    "rescheduled",
-    "next steps",
-    "phone screen",
-    "screening call",
-    "let's chat",
-    "quick chat",
-  ];
-  const fromTerms = [
-    "careers@",
-    "jobs@",
-    "recruiting@",
-    "talent@",
-    "no-reply@greenhouse.io",
-    "no-reply@us.greenhouse-mail.io",
-    "no-reply@ashbyhq.com",
-    "notification@smartrecruiters.com",
-    "@smartrecruiters.com",
-    "@workablemail.com",
-    "@hire.lever.co",
-    "@myworkday.com",
-    "@workdaymail.com",
-    "@greenhouse.io",
-    "@ashbyhq.com",
-    // Scheduling / calendar providers
-    "@calendly.com",
-    "@savvycal.com",
-    "calendar-notification@google.com",
-  ];
-  // Full-text (subject OR body) terms. Recruiter follow-ups and calendar
-  // invites often carry a plain job-title or "First and Last" subject with no
-  // recruitment keyword and come from an arbitrary company/personal domain, so
-  // the only reliable signal lives in the body (booking links, thank-you
-  // phrasing). Keep these high-precision to avoid flooding busy inboxes.
-  const fullTextTerms = [
-    "thank you for applying",
-    "thanks for applying",
-    "book a time",
-    "book the best time",
-    "schedule a call",
-    "microsoft teams meeting",
-    "calendly.com",
-    "savvycal.com",
-  ];
-  const excludeSubjectTerms = [
-    "newsletter",
-    "webinar",
-    "course",
-    "discount",
-    "event invitation",
-    "job search council",
-    "matched new opportunities",
-  ];
-
-  const quoteTerm = (value: string) => `"${value.replace(/"/g, '\\"')}"`;
-  const subjectBlock = subjectTerms
-    .map((term) => `subject:${quoteTerm(term)}`)
-    .join(" OR ");
-  const fromBlock = fromTerms
-    .map((term) => `from:${quoteTerm(term)}`)
-    .join(" OR ");
-  const fullTextBlock = fullTextTerms
-    .map((term) => quoteTerm(term))
-    .join(" OR ");
-  const excludeClauses = excludeSubjectTerms
-    .map((term) => `-subject:${quoteTerm(term)}`)
-    .join(" ");
-
-  return `newer_than:${searchDays}d ((${subjectBlock}) OR (${fromBlock}) OR (${fullTextBlock})) ${excludeClauses}`.trim();
+export function buildGmailQuery(
+  searchDays: number,
+  keywords: string[] = [],
+): string {
+  const terms = keywords.map(
+    (term) => `"${term.replace(/["\\{}\r\n]/g, " ").trim()}"`,
+  );
+  return `newer_than:${searchDays}d${terms.length ? ` {${terms.join(" ")}}` : ""}`;
 }
 
 export async function listMessageIds(
   token: string,
   searchDays: number,
   maxMessages: number,
+  keywords: string[] = [],
 ): Promise<GmailListMessage[]> {
   const messages: GmailListMessage[] = [];
   let pageToken: string | undefined;
 
   do {
-    const q = encodeURIComponent(buildGmailQuery(searchDays));
+    const q = encodeURIComponent(buildGmailQuery(searchDays, keywords));
     const listUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${q}&maxResults=${Math.min(
       100,
       maxMessages,
@@ -297,7 +206,7 @@ export async function getMessageMetadata(
     token,
     `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(
       messageId,
-    )}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
+    )}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To`,
   );
 
   return {

@@ -4,6 +4,7 @@ import {
   STAGE_LABELS,
   type StageEvent,
 } from "@shared/types.js";
+import { currentAttemptEvents } from "@shared/utils/application-attempts";
 import {
   CheckCircle2,
   ClipboardList,
@@ -68,8 +69,11 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({
   const [openGroups, setOpenGroups] = React.useState<Record<string, boolean>>(
     {},
   );
-  const lastEvent = events.at(-1);
+  const lastEvent = currentAttemptEvents(events).at(-1);
   const currentStage = lastEvent?.toStage ?? null;
+  const hasMultipleAttempts = events.some(
+    (event) => (event.attemptSequence ?? 1) > 1,
+  );
 
   const entries = React.useMemo(() => {
     const groups = new Map<string, { label: string; events: StageEvent[] }>();
@@ -152,7 +156,7 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({
           const reason = entry.event.metadata?.reasonCode;
           const isCurrent =
             currentStage === entry.event.toStage &&
-            entryIndex === entries.length - 1 &&
+            entry.event.id === lastEvent?.id &&
             entry.event.toStage !== "applied";
           const isOffer = entry.event.toStage === "offer";
           const salary = entry.event.metadata?.externalUrl?.startsWith(
@@ -172,6 +176,11 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({
               onEdit={onEdit ? () => onEdit(entry.event) : undefined}
               onDelete={onDelete ? () => onDelete(entry.event.id) : undefined}
             >
+              {hasMultipleAttempts && (
+                <Badge variant="secondary" className="mb-2 text-[10px]">
+                  Attempt {entry.event.attemptSequence ?? 1}
+                </Badge>
+              )}
               {note && (
                 <div className="text-sm text-muted-foreground">{note}</div>
               )}
@@ -202,7 +211,7 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({
         );
         const isCurrentGroup =
           currentStage === entry.events.at(-1)?.toStage &&
-          entryIndex === entries.length - 1;
+          entry.events.some((event) => event.id === lastEvent?.id);
 
         return (
           <div key={entry.id} className="space-y-2">
@@ -231,6 +240,11 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({
                       onEdit={onEdit ? () => onEdit(event) : undefined}
                       onDelete={onDelete ? () => onDelete(event.id) : undefined}
                     >
+                      {hasMultipleAttempts && (
+                        <Badge variant="secondary" className="mb-2 text-[10px]">
+                          Attempt {event.attemptSequence ?? 1}
+                        </Badge>
+                      )}
                       {event.metadata?.note && (
                         <div className="text-xs text-muted-foreground">
                           {event.metadata.note}

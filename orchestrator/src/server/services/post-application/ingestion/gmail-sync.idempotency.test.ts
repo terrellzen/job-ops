@@ -3,6 +3,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("../attempt-routing", () => ({
+  bindConfirmedMessage: vi.fn(),
+  routeExistingPendingMessages: vi.fn(),
+  extractApplicationIdentifiers: vi.fn().mockReturnValue({}),
+  resolveEmailAttempt: vi
+    .fn()
+    .mockImplementation(async (args: { suggestedJobId: string | null }) => ({
+      jobId: args.suggestedJobId,
+      attempt: { id: "attempt-1" },
+      confidence: 99,
+      automaticClosedLink: false,
+      preserveStatus: false,
+      reviewReason: null,
+    })),
+}));
+
 const mocks = vi.hoisted(() => ({
   getPostApplicationMessageByExternalId: vi.fn(),
   upsertPostApplicationMessage: vi.fn(),

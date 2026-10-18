@@ -107,6 +107,7 @@ export interface PostApplicationSyncRun {
 }
 
 export interface PostApplicationMessage {
+  applicationAttemptId?: string | null;
   id: string;
   provider: PostApplicationProvider;
   accountKey: string;
@@ -167,6 +168,7 @@ export interface PostApplicationProviderActionResponse {
 
 export interface PostApplicationInboxItem {
   message: PostApplicationMessage;
+  attempts?: ApplicationAttempt[];
   matchedJob?: {
     id: string;
     title: string;
@@ -216,4 +218,17 @@ export interface PostApplicationActionResponse {
   failed: number;
   skipped: number;
   results: PostApplicationActionResult[];
+}
+
+export interface ApplicationAttempt {
+  id: string;
+  jobId: string;
+  sequence: number;
+  appliedAt: number;
+  closedAt: number | null;
+  stage: string;
+  outcome: string | null;
+  applicationReference: string | null;
+  requisitionId: string | null;
+  current: boolean;
 }

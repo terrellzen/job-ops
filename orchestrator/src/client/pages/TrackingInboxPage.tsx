@@ -1,6 +1,7 @@
 import type {
   JobListItem,
   PostApplicationInboxItem,
+  PostApplicationIntegration,
   PostApplicationProvider,
   PostApplicationSyncRun,
 } from "@shared/types";
@@ -18,7 +19,9 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
+import { fetchApi } from "@/client/api/core";
 import { useQueryErrorToast } from "@/client/hooks/useQueryErrorToast";
 import { showErrorToast } from "@/client/lib/error-toast";
 import { queryKeys } from "@/client/lib/queryKeys";
@@ -55,7 +58,12 @@ import { trackProductEvent } from "@/lib/analytics";
 import { formatDateTime } from "@/lib/utils";
 import * as api from "../api";
 import { EmptyState, PageHeader, PageMain } from "../components";
+import { EmailKeywordFilters } from "./tracking-inbox/EmailKeywordFilters";
 import { EmailViewerList } from "./tracking-inbox/EmailViewerList";
+import {
+  loadInboxSelection,
+  saveInboxSelection,
+} from "./tracking-inbox/inbox-selection";
 
 const PROVIDER_OPTIONS: PostApplicationProvider[] = [
   ...POST_APPLICATION_PROVIDERS,
@@ -78,8 +86,17 @@ function formatEpochMs(value?: number | null): string {
 }
 
 export const TrackingInboxPage: React.FC = () => {
-  const [provider, setProvider] = useState<PostApplicationProvider>("gmail");
-  const [accountKey, setAccountKey] = useState("default");
+  const navigate = useNavigate();
+  const [initialSelection] = useState(() =>
+    loadInboxSelection(window.location.search),
+  );
+  const [provider, setProvider] = useState<PostApplicationProvider>(
+    initialSelection.provider,
+  );
+  const [accountKey, setAccountKey] = useState(initialSelection.accountKey);
+  useEffect(() => {
+    saveInboxSelection(provider, accountKey);
+  }, [provider, accountKey]);
   const [maxMessages, setMaxMessages] = useState("100");
   const [searchDays, setSearchDays] = useState("90");
   const isDefaultAccountKey = accountKey.trim() === "default";
@@ -98,6 +115,27 @@ export const TrackingInboxPage: React.FC = () => {
   const [appliedJobByMessageId, setAppliedJobByMessageId] = useState<
     Record<string, string>
   >({});
+  const accountsQuery = useQuery({
+    queryKey: ["email-accounts"],
+    queryFn: () =>
+      fetchApi<{ accounts: PostApplicationIntegration[] }>(
+        "/post-application/accounts",
+      ),
+  });
+  const imapAccounts = useMemo(
+    () =>
+      (accountsQuery.data?.accounts ?? []).filter(
+        (account) =>
+          account.provider === "imap" && account.status !== "disconnected",
+      ),
+    [accountsQuery.data],
+  );
+  useEffect(() => {
+    if (provider === "imap" && accountKey === "default" && imapAccounts[0]) {
+      setAccountKey(imapAccounts[0].accountKey);
+    }
+  }, [provider, accountKey, imapAccounts]);
+
   const statusQuery = useQuery({
     queryKey: queryKeys.postApplication.providerStatus(provider, accountKey),
     queryFn: () => api.postApplicationProviderStatus({ provider, accountKey }),
@@ -197,7 +235,7 @@ export const TrackingInboxPage: React.FC = () => {
   }, [provider, accountKey]);
 
   useEffect(() => {
-    const defaultAppliedJobId = appliedJobs[0]?.id ?? "";
+    const defaultAppliedJobId = "";
     setAppliedJobByMessageId((previous) => {
       const next = { ...previous };
       let didChange = false;
@@ -299,9 +337,7 @@ export const TrackingInboxPage: React.FC = () => {
               provider,
               result: "error",
             });
-            toast.error(
-              `${provider} connect is not implemented yet. Use Gmail for now.`,
-            );
+            navigate("/settings#email-accounts");
             return;
           }
 
@@ -432,32 +468,40 @@ export const TrackingInboxPage: React.FC = () => {
       refresh,
       searchDays,
       waitForGmailOauthResult,
+      navigate,
     ],
   );
 
   const handleDecision = useCallback(
     async (
       item: PostApplicationInboxItem,
-      decision: "approve" | "deny",
+      decision: "approve" | "deny" | "link" | "reopen" | "new_attempt",
       context: "main_inbox" | "run_modal",
+      options?: { applicationAttemptId?: string },
     ) => {
       const selectedJobId =
         appliedJobByMessageId[item.message.id] || item.message.matchedJobId;
 
-      if (decision === "approve" && !selectedJobId) {
+      if (decision !== "deny" && !selectedJobId) {
         toast.error("Select an applied job before making a decision.");
         return;
       }
 
       setIsActionLoading(true);
       try {
-        if (decision === "approve") {
+        if (decision !== "deny") {
           await api.approvePostApplicationInboxItem({
             messageId: item.message.id,
             provider,
             accountKey,
             jobId: selectedJobId ?? undefined,
-            stageTarget: item.message.stageTarget ?? undefined,
+            applicationAttemptId: options?.applicationAttemptId,
+            reopen: decision === "reopen",
+            newAttempt: decision === "new_attempt",
+            stageTarget:
+              decision === "link"
+                ? "no_change"
+                : (item.message.stageTarget ?? undefined),
           });
           trackProductEvent("tracking_inbox_review_action_completed", {
             action: "approve",
@@ -466,7 +510,15 @@ export const TrackingInboxPage: React.FC = () => {
             provider,
             result: "success",
           });
-          toast.success("Message linked");
+          toast.success(
+            decision === "link"
+              ? "Email linked. Job status unchanged."
+              : decision === "reopen"
+                ? "Application reopened; email linked."
+                : decision === "new_attempt"
+                  ? "New application attempt started; email linked."
+                  : "Message linked",
+          );
         } else {
           await api.denyPostApplicationInboxItem({
             messageId: item.message.id,
@@ -486,7 +538,7 @@ export const TrackingInboxPage: React.FC = () => {
         await refresh();
       } catch (error) {
         trackProductEvent("tracking_inbox_review_action_completed", {
-          action: decision,
+          action: decision === "deny" ? "deny" : "approve",
           context,
           item_count: 1,
           provider,
@@ -590,6 +642,7 @@ export const TrackingInboxPage: React.FC = () => {
     statusQuery.error,
     "Failed to load provider connection status",
   );
+  useQueryErrorToast(accountsQuery.error, "Failed to load email accounts");
   useQueryErrorToast(inboxQuery.error, "Failed to load inbox");
   useQueryErrorToast(runsQuery.error, "Failed to load sync runs");
   useQueryErrorToast(
@@ -668,9 +721,11 @@ export const TrackingInboxPage: React.FC = () => {
                 <Label htmlFor="provider">Provider</Label>
                 <Select
                   value={provider}
-                  onValueChange={(value) =>
-                    setProvider(value as PostApplicationProvider)
-                  }
+                  onValueChange={(value) => {
+                    const selection = loadInboxSelection(`?provider=${value}`);
+                    setProvider(selection.provider);
+                    setAccountKey(selection.accountKey);
+                  }}
                 >
                   <SelectTrigger id="provider">
                     <SelectValue placeholder="Provider" />
@@ -686,18 +741,41 @@ export const TrackingInboxPage: React.FC = () => {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="accountKey">Account Key</Label>
-                <Input
-                  id="accountKey"
-                  value={accountKey}
-                  onChange={(event) => setAccountKey(event.target.value)}
-                />
+                <Label htmlFor="accountKey">
+                  {provider === "imap" ? "Email account" : "Account Key"}
+                </Label>
+                {provider === "imap" ? (
+                  <Select value={accountKey} onValueChange={setAccountKey}>
+                    <SelectTrigger id="accountKey">
+                      <SelectValue placeholder="Select an email account" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {imapAccounts.map((account) => (
+                        <SelectItem key={account.id} value={account.accountKey}>
+                          {account.displayName ||
+                            String(
+                              account.credentials?.email || account.accountKey,
+                            )}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    id="accountKey"
+                    value={accountKey}
+                    onChange={(event) => setAccountKey(event.target.value)}
+                  />
+                )}
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Gmail connect uses Google OAuth popup and stores credentials
-              server-side. No manual refresh token paste is needed.
+              {provider === "gmail"
+                ? "Gmail connect uses a Google OAuth popup. Credentials are stored server-side."
+                : "Manage IMAP accounts in Settings → Email Accounts. Synchronization is incremental and limited by Search Days and Max Messages."}
             </p>
+
+            <EmailKeywordFilters disabled={isActionLoading} />
 
             <div className="grid gap-3 md:grid-cols-4">
               <div className="space-y-2">
@@ -726,7 +804,7 @@ export const TrackingInboxPage: React.FC = () => {
                     className="gap-2"
                   >
                     <Link2 className="h-4 w-4" />
-                    Connect
+                    {provider === "imap" ? "Manage accounts" : "Connect"}
                   </Button>
                 ) : null}
                 <Button
@@ -818,8 +896,8 @@ export const TrackingInboxPage: React.FC = () => {
                 appliedJobs={appliedJobs}
                 appliedJobByMessageId={appliedJobByMessageId}
                 onAppliedJobChange={handleAppliedJobChange}
-                onDecision={(item, decision) =>
-                  void handleDecision(item, decision, "main_inbox")
+                onDecision={(item, decision, options) =>
+                  void handleDecision(item, decision, "main_inbox", options)
                 }
                 isActionLoading={isActionLoading}
                 isAppliedJobsLoading={isAppliedJobsLoading}
@@ -905,8 +983,8 @@ export const TrackingInboxPage: React.FC = () => {
                 appliedJobs={appliedJobs}
                 appliedJobByMessageId={appliedJobByMessageId}
                 onAppliedJobChange={handleAppliedJobChange}
-                onDecision={(item, decision) =>
-                  void handleDecision(item, decision, "run_modal")
+                onDecision={(item, decision, options) =>
+                  void handleDecision(item, decision, "run_modal", options)
                 }
                 isActionLoading={isActionLoading}
                 isAppliedJobsLoading={isAppliedJobsLoading}
