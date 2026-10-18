@@ -167,6 +167,7 @@ export interface PostApplicationProviderActionResponse {
 }
 
 export interface PostApplicationInboxItem {
+  reopeningEligible?: boolean;
   message: PostApplicationMessage;
   attempts?: ApplicationAttempt[];
   matchedJob?: {

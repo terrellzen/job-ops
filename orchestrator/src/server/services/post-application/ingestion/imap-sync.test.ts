@@ -222,7 +222,7 @@ describe("incremental IMAP ingestion", () => {
     ]);
     expect(mocks.fetchOne).toHaveBeenCalledWith(
       511,
-      { size: true },
+      expect.objectContaining({ size: true }),
       { uid: true },
     );
   });
@@ -305,6 +305,74 @@ describe("incremental IMAP ingestion", () => {
     mocks.mailboxOpen.mockResolvedValue({ uidValidity: 5n, uidNext: 11 });
     await runImapSync("one");
     expect(mocks.search).not.toHaveBeenCalled();
+  });
+  it("quarantines oversized mail without downloading it or blocking later UIDs", async () => {
+    const normalFetch = mocks.fetchOne.getMockImplementation();
+    if (!normalFetch) throw new Error("Missing fetch fixture");
+    mocks.fetchOne.mockImplementation(async (uid, query, options) =>
+      uid === 11 ? { size: 6 * 1024 * 1024 } : normalFetch(uid, query, options),
+    );
+    await expect(runImapSync("one")).resolves.toBe(2);
+    expect(mocks.fetchOne).not.toHaveBeenCalledWith(
+      11,
+      expect.objectContaining({ source: true }),
+      expect.anything(),
+    );
+    expect(mocks.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorCode: "IMAP_MESSAGE_TOO_LARGE",
+        processingStatus: "pending_user",
+      }),
+    );
+    expect(mocks.classify).toHaveBeenCalledTimes(1);
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        credentials: expect.objectContaining({ lastUid: 12 }),
+      }),
+    );
+  });
+  it("persists manual limits for automatic polling and resumes checkpoints independently per window", async () => {
+    mocks.update.mockImplementation(async (input) => {
+      if (input.credentials)
+        mocks.get.mockResolvedValue({
+          id: "account",
+          status: "connected",
+          credentials: structuredClone(input.credentials),
+        });
+      return null;
+    });
+    mocks.search.mockResolvedValue([1, 2, 3, 4, 5]);
+    await runImapSync("one", 2, 7);
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        credentials: expect.objectContaining({
+          syncSearchDays: 7,
+          syncMaxMessages: 2,
+          lastUid: 2,
+        }),
+      }),
+    );
+    mocks.search.mockClear();
+    await runImapSync("one");
+    expect(mocks.search).toHaveBeenCalledWith(
+      expect.objectContaining({ uid: "3:12" }),
+      { uid: true },
+    );
+    // A deliberate historical scan uses its own original checkpoint (UID 10).
+    mocks.search.mockClear();
+    mocks.search.mockResolvedValue([11, 12]);
+    await runImapSync("one", 1, 90);
+    // Preserve the pre-upgrade checkpoint when switching search windows.
+    expect(mocks.search).toHaveBeenCalledWith(
+      expect.objectContaining({ uid: "11:12" }),
+      { uid: true },
+    );
+    mocks.search.mockClear();
+    await runImapSync("one", 2, 7);
+    expect(mocks.search).toHaveBeenCalledWith(
+      expect.objectContaining({ uid: "5:12" }),
+      { uid: true },
+    );
   });
   it("deduplicates RFC Message-ID across folders and UID resets", () => {
     expect(imapMessageIdentity("INBOX", "1", 1, "<id@example.com>")).toBe(

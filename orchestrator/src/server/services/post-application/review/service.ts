@@ -63,6 +63,10 @@ function buildMatchedJobMap(
   const jobById = new Map(jobs.map((job) => [job.id, job]));
   return items.map((message) => ({
     message,
+    reopeningEligible: isClosedAttemptOpportunity(
+      message.stageTarget ?? stageTargetFromMessageType(message.messageType),
+      message.stageEventPayload,
+    ),
     attempts: message.matchedJobId
       ? listApplicationAttempts(message.matchedJobId)
       : [],
@@ -122,6 +126,19 @@ export async function approvePostApplicationInboxItem(args: {
       `Message '${args.messageId}' is already decided with status '${message.processingStatus}'.`,
     );
   }
+
+  if (message.errorCode === "IMAP_MESSAGE_TOO_LARGE")
+    throw conflict(
+      "This email was not downloaded. Review it in your mail client, then skip it here.",
+    );
+  if (
+    message.classificationPayload?.explicitSelectionRequired === true &&
+    !args.applicationAttemptId &&
+    !args.newAttempt
+  )
+    throw conflict(
+      "Choose the correct application attempt explicitly before approving this email.",
+    );
 
   const resolvedJobId = args.jobId ?? message.matchedJobId;
   if (!resolvedJobId) {
@@ -459,18 +476,6 @@ export async function runPostApplicationInboxAction(
     const { message, matchedJob } = item;
 
     if (action === "approve") {
-      if (!message.applicationAttemptId && (item.attempts?.length ?? 0) > 1) {
-        skipped++;
-        results.push({
-          messageId: message.id,
-          ok: false,
-          error: {
-            code: "ATTEMPT_REQUIRED",
-            message: "Choose the correct application attempt individually.",
-          },
-        });
-        continue;
-      }
       if (!matchedJob) {
         skipped++;
         results.push({
@@ -479,6 +484,22 @@ export async function runPostApplicationInboxAction(
           error: {
             code: "NO_SUGGESTED_MATCH",
             message: "Message has no suggested job match",
+          },
+        });
+        continue;
+      }
+      if (
+        message.errorCode === "IMAP_MESSAGE_TOO_LARGE" ||
+        message.classificationPayload?.explicitSelectionRequired === true ||
+        (!message.applicationAttemptId && (item.attempts?.length ?? 0) > 1)
+      ) {
+        skipped++;
+        results.push({
+          messageId: message.id,
+          ok: false,
+          error: {
+            code: "ATTEMPT_REQUIRED",
+            message: "Choose the correct application attempt individually.",
           },
         });
         continue;

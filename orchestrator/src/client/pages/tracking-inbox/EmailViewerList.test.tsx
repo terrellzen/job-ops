@@ -4,7 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderWithQueryClient as render } from "@/client/test/renderWithQueryClient";
 import { EmailViewerList } from "./EmailViewerList";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 const defaultAttempt = {
   id: "attempt-1",
   jobId: "job",
@@ -114,6 +117,7 @@ describe("choosing an application attempt", () => {
   it("offers explicit reopening separately from keeping an opportunity closed", () => {
     const closed = {
       ...item,
+      reopeningEligible: true,
       attempts: [{ ...defaultAttempt, closedAt: Date.now() - 1000 }],
       message: {
         ...item.message,
@@ -129,6 +133,62 @@ describe("choosing an application attempt", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "New application" }));
     expect(onDecision).toHaveBeenCalledWith(closed, "new_attempt", {
+      applicationAttemptId: "attempt-1",
+    });
+  });
+  it("offers reopening after selecting a closed job for an unmatched offer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              attempts: [{ ...defaultAttempt, closedAt: Date.now() - 1000 }],
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    const unmatched = {
+      ...item,
+      reopeningEligible: true,
+      attempts: [],
+      message: {
+        ...item.message,
+        matchedJobId: null,
+        applicationAttemptId: null,
+        stageTarget: "offer" as const,
+        classificationPayload: {
+          attemptReviewReason:
+            "Choose the application attempt before linking this email.",
+        },
+      },
+    };
+    const decide = setup(unmatched, { email: "job" });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Reopen application" }),
+    );
+    expect(decide).toHaveBeenCalledWith(unmatched, "reopen", {
+      applicationAttemptId: "attempt-1",
+    });
+  });
+  it("shows a skip control for quarantined mail without allowing a status change", () => {
+    const oversized = {
+      ...item,
+      message: {
+        ...item.message,
+        errorCode: "IMAP_MESSAGE_TOO_LARGE",
+        errorMessage: "Review in your mail client.",
+      },
+    };
+    const decide = setup(oversized);
+    expect(
+      screen.queryByRole("button", { name: "Confirm email-job match" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Skip email" }));
+    expect(decide).toHaveBeenCalledWith(oversized, "deny", {
       applicationAttemptId: "attempt-1",
     });
   });

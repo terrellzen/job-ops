@@ -455,6 +455,7 @@ export async function runGmailIngestionSync(args: {
               attemptMatchConfidence: routing.confidence,
               attemptSequence: routing.attempt?.sequence ?? null,
               attemptReviewReason: routing.reviewReason,
+              explicitSelectionRequired: !routing.attempt,
               linkDecision: routing.automaticClosedLink
                 ? "Email linked automatically; application remains closed."
                 : null,

@@ -28,7 +28,19 @@ export const imapConfigSchema = z.object({
   uidValidity: z.string().optional(),
   lastUid: z.number().int().nonnegative().optional(),
   keywordFilterFingerprint: z.string().optional(),
-  syncSearchDays: z.number().int().optional(),
+  syncSearchDays: z.number().int().min(1).max(365).optional(),
+  syncMaxMessages: z.number().int().min(1).max(500).optional(),
+  searchCheckpoints: z
+    .array(
+      z.object({
+        fingerprint: z.string(),
+        searchDays: z.number().int(),
+        uidValidity: z.string(),
+        lastUid: z.number().int().nonnegative(),
+      }),
+    )
+    .max(20)
+    .optional(),
 });
 export type ImapConfig = z.infer<typeof imapConfigSchema>;
 

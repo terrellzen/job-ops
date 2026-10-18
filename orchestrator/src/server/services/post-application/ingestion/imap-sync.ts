@@ -62,12 +62,20 @@ export function imapMessageIdentity(
 }
 export async function runImapSync(
   accountKey: string,
-  maxMessages = 100,
-  searchDays = 90,
+  requestedMaxMessages?: number,
+  requestedSearchDays?: number,
 ): Promise<number> {
   return withImapAccountLock(accountKey, async () => {
     const integration = await getPostApplicationIntegration("imap", accountKey);
     const config = parseImapConfig(integration?.credentials);
+    const maxMessages = Math.min(
+      500,
+      Math.max(1, requestedMaxMessages ?? config.syncMaxMessages ?? 100),
+    );
+    const searchDays = Math.min(
+      365,
+      Math.max(1, requestedSearchDays ?? config.syncSearchDays ?? 90),
+    );
     const keywords = resolveEmailKeywords(await getEmailKeywordFilter());
     const filterFingerprint = createHash("sha256")
       .update(JSON.stringify(keywords.slice().sort()))
@@ -92,13 +100,37 @@ export async function runImapSync(
           readOnly: true,
         });
         const validity = String(mailbox.uidValidity);
+        // Retain the pre-upgrade cursor when the first new search uses a
+        // different window, rather than forcing a duplicate historical scan.
+        if (
+          !config.searchCheckpoints &&
+          config.keywordFilterFingerprint &&
+          config.uidValidity &&
+          config.syncSearchDays !== undefined
+        ) {
+          config.searchCheckpoints = [
+            {
+              fingerprint: config.keywordFilterFingerprint,
+              searchDays: config.syncSearchDays,
+              uidValidity: config.uidValidity,
+              lastUid: config.lastUid ?? 0,
+            },
+          ];
+        }
+        const savedCheckpoint = config.searchCheckpoints?.find(
+          (checkpoint) =>
+            checkpoint.fingerprint === filterFingerprint &&
+            checkpoint.searchDays === searchDays &&
+            checkpoint.uidValidity === validity,
+        );
         let lastUid =
-          config.uidValidity === validity &&
+          savedCheckpoint?.lastUid ??
+          (config.uidValidity === validity &&
           config.keywordFilterFingerprint === filterFingerprint &&
           config.syncSearchDays === searchDays
             ? (config.lastUid ?? 0)
-            : 0;
-        if (lastUid >= mailbox.uidNext - 1) return;
+            : 0);
+
         // Bound SEARCH responses for large mailboxes; an unbounded UID list can
         // exceed transport limits. A failed SEARCH must never mean an empty inbox.
         const limit = Math.min(500, Math.max(1, maxMessages));
@@ -110,6 +142,22 @@ export async function runImapSync(
           config.uidValidity = validity;
           config.keywordFilterFingerprint = filterFingerprint;
           config.syncSearchDays = searchDays;
+          config.syncMaxMessages = maxMessages;
+          config.searchCheckpoints = [
+            ...(config.searchCheckpoints ?? []).filter(
+              (checkpoint) =>
+                !(
+                  checkpoint.fingerprint === filterFingerprint &&
+                  checkpoint.searchDays === searchDays
+                ),
+            ),
+            {
+              fingerprint: filterFingerprint,
+              searchDays,
+              uidValidity: validity,
+              lastUid: uid,
+            },
+          ].slice(-20);
           await updatePostApplicationIntegrationSyncState({
             provider: "imap",
             accountKey,
@@ -117,6 +165,10 @@ export async function runImapSync(
           });
           lastUid = uid;
         };
+        if (lastUid >= mailbox.uidNext - 1) {
+          await saveCheckpoint(lastUid);
+          return;
+        }
         const uids: number[] = [];
         let searchedThroughUid = lastUid;
         for (
@@ -151,12 +203,44 @@ export async function runImapSync(
         for (const uid of uids) {
           const metadata = await client.fetchOne(
             uid,
-            { size: true },
+            { size: true, envelope: true, internalDate: true },
             { uid: true },
           );
-          // Do not silently skip oversized messages; keep checkpoint before the failure.
-          if (metadata && (metadata.size ?? 0) > 5 * 1024 * 1024)
-            throw new Error("Message exceeds IMAP size limit.");
+          // Quarantine metadata only; never download an oversized source. Persist
+          // before advancing so later emails can proceed without hiding failure.
+          if (metadata && (metadata.size ?? 0) > 5 * 1024 * 1024) {
+            await upsertPostApplicationMessage({
+              provider: "imap",
+              accountKey,
+              integrationId: integration.id,
+              syncRunId: run.id,
+              externalMessageId: `oversized:${imapMessageIdentity(config.mailbox, validity, uid)}`,
+              fromAddress: metadata.envelope?.from?.[0]?.address ?? "",
+              subject:
+                metadata.envelope?.subject ??
+                `Email exceeds size limit (UID ${uid})`,
+              receivedAt:
+                metadata.internalDate instanceof Date
+                  ? metadata.internalDate.getTime()
+                  : Date.now(),
+              snippet: "",
+              relevanceDecision: "needs_llm",
+              messageType: "other",
+              processingStatus: "pending_user",
+              errorCode: "IMAP_MESSAGE_TOO_LARGE",
+              errorMessage:
+                "Email exceeds the 5 MiB download limit. Review it in your mail client, then choose Skip email. Later emails continue syncing.",
+              classificationPayload: {
+                mailbox: config.mailbox,
+                uidValidity: validity,
+                uid,
+                size: metadata.size,
+              },
+            });
+            processed++;
+            await saveCheckpoint(uid);
+            continue;
+          }
           const fetched = await client.fetchOne(
             uid,
             { source: true, internalDate: true },
@@ -279,6 +363,7 @@ export async function runImapSync(
                   attemptMatchConfidence: routing.confidence,
                   attemptSequence: routing.attempt?.sequence ?? null,
                   attemptReviewReason: routing.reviewReason,
+                  explicitSelectionRequired: !routing.attempt,
                   linkDecision: routing.automaticClosedLink
                     ? "Email linked automatically; application remains closed."
                     : null,

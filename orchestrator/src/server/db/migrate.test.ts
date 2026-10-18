@@ -390,8 +390,8 @@ describe.sequential("database migrations", () => {
         ALTER TABLE post_application_messages DROP COLUMN application_attempt_id;
         DROP TABLE application_email_identities;
         DROP TABLE application_attempts;
-        INSERT INTO jobs(id, title, employer, job_url, status, applied_at, closed_at, outcome)
-          VALUES ('legacy', 'Engineer', 'Acme', 'https://example.com/legacy', 'in_progress', '2025-01-01T00:00:00Z', 1738368000, 'withdrawn');
+        INSERT INTO jobs(id, title, employer, job_url, status, applied_at, closed_at, outcome, source_job_id)
+          VALUES ('legacy', 'Engineer', 'Acme', 'https://example.com/legacy', 'in_progress', '2025-01-01T00:00:00Z', 1738368000, 'withdrawn', 'REQ-123');
         INSERT INTO stage_events(id, application_id, title, to_stage, occurred_at, outcome)
           VALUES ('event', 'legacy', 'Closed', 'closed', 1738368000, 'withdrawn');
         INSERT INTO post_application_messages(id, provider, external_message_id, matched_job_id, received_at)
@@ -402,6 +402,8 @@ describe.sequential("database migrations", () => {
       database = new Database(path);
       const first = database.prepare('SELECT * FROM application_attempts WHERE job_id = ?').get('legacy');
       if (!first || first.sequence !== 1 || first.applied_at !== Date.parse('2025-01-01T00:00:00Z')) throw new Error('Legacy application not backfilled');
+      if (first.requisition_id !== 'REQ-123') throw new Error('Posting ID not backfilled');
+      database.prepare('UPDATE application_attempts SET requisition_id = NULL WHERE id = ?').run(first.id);
       if (database.prepare('SELECT application_attempt_id AS id FROM post_application_messages WHERE id = ?').get('mail').id !== first.id) throw new Error('Legacy mail not associated');
       database.prepare('INSERT INTO application_attempts(id, tenant_id, job_id, sequence, applied_at) VALUES (?, ?, ?, ?, ?)').run('second', 'tenant_default', 'legacy', 2, Date.now());
       database.prepare('UPDATE post_application_messages SET application_attempt_id = ? WHERE id = ?').run('second', 'mail');
@@ -409,6 +411,8 @@ describe.sequential("database migrations", () => {
       database.close();
       await import(migrate + '?repeat');
       database = new Database(path);
+      if (database.prepare('SELECT requisition_id FROM application_attempts WHERE id = ?').get(first.id).requisition_id !== 'REQ-123') throw new Error('Existing upgraded attempt not repaired');
+      if (database.prepare('SELECT requisition_id FROM application_attempts WHERE id = ?').get('second').requisition_id !== null) throw new Error('Migration copied initial posting ID to reapplication');
       if (database.prepare('SELECT count(*) AS n FROM application_attempts WHERE job_id = ?').get('legacy').n !== 2) throw new Error('Repeated migration lost attempts');
       if (database.prepare('SELECT application_attempt_id AS id FROM post_application_messages WHERE id = ?').get('mail').id !== 'second') throw new Error('Repeated migration lost email association');
       if (database.prepare('SELECT count(*) AS n FROM application_email_identities').get().n !== 1) throw new Error('Repeated migration lost identities');

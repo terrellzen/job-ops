@@ -313,7 +313,7 @@ export async function routeExistingPendingMessages(
   );
   for (const row of rows) {
     const message = await getPostApplicationMessageById(row.id);
-    if (!message) continue;
+    if (!message || message.errorCode === "IMAP_MESSAGE_TOO_LARGE") continue;
     const routing = await resolveEmailAttempt({
       provider,
       accountKey,
@@ -333,6 +333,7 @@ export async function routeExistingPendingMessages(
             ...message.classificationPayload,
             attemptReviewReason: routing.reviewReason,
             attemptMatchConfidence: 0,
+            explicitSelectionRequired: true,
           },
         })
         .where(
@@ -361,6 +362,7 @@ export async function routeExistingPendingMessages(
           classificationPayload: {
             ...message.classificationPayload,
             attemptMatchConfidence: routing.confidence,
+            explicitSelectionRequired: false,
             attemptSequence: routing.attempt?.sequence ?? null,
             attemptReviewReason: routing.reviewReason,
             linkDecision: routing.automaticClosedLink

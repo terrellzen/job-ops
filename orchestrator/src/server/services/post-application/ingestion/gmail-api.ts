@@ -153,10 +153,90 @@ export function buildGmailQuery(
   searchDays: number,
   keywords: string[] = [],
 ): string {
+  const subjectTerms = [
+    "application",
+    "thank you for applying",
+    "thanks for applying",
+    "application received",
+    "application submitted",
+    "your application",
+    "interview",
+    "assessment",
+    "coding challenge",
+    "take-home",
+    "availability",
+    "offer",
+    "offer letter",
+    "referral",
+    "recruiter",
+    "hiring team",
+    "regret to inform",
+    "not moving forward",
+    "not selected",
+    "application unsuccessful",
+    "moving forward with other candidates",
+    "unable to proceed",
+    "position has been filled",
+    "hiring freeze",
+    "position on hold",
+    "withdrawn",
+    // Interview scheduling / calendar coordination
+    "invitation",
+    "updated invitation",
+    "reschedule",
+    "rescheduled",
+    "next steps",
+    "phone screen",
+    "screening call",
+    "let's chat",
+    "quick chat",
+  ];
+  const fromTerms = [
+    "careers@",
+    "jobs@",
+    "recruiting@",
+    "talent@",
+    "no-reply@greenhouse.io",
+    "no-reply@us.greenhouse-mail.io",
+    "no-reply@ashbyhq.com",
+    "notification@smartrecruiters.com",
+    "@smartrecruiters.com",
+    "@workablemail.com",
+    "@hire.lever.co",
+    "@myworkday.com",
+    "@workdaymail.com",
+    "@greenhouse.io",
+    "@ashbyhq.com",
+    // Scheduling / calendar providers
+    "@calendly.com",
+    "@savvycal.com",
+    "calendar-notification@google.com",
+  ];
+  // Full-text (subject OR body) terms. Recruiter follow-ups and calendar
+  // invites often carry a plain job-title or "First and Last" subject with no
+  // recruitment keyword and come from an arbitrary company/personal domain, so
+  // the only reliable signal lives in the body (booking links, thank-you
+  // phrasing). Keep these high-precision to avoid flooding busy inboxes.
+  const fullTextTerms = [
+    "thank you for applying",
+    "thanks for applying",
+    "book a time",
+    "book the best time",
+    "schedule a call",
+    "microsoft teams meeting",
+    "calendly.com",
+    "savvycal.com",
+  ];
   const terms = keywords.map(
     (term) => `"${term.replace(/["\\{}\r\n]/g, " ").trim()}"`,
   );
-  return `newer_than:${searchDays}d${terms.length ? ` {${terms.join(" ")}}` : ""}`;
+  const discovery = [
+    ...terms,
+    ...subjectTerms.map((term) => `subject:"${term}"`),
+    ...fromTerms.map((term) => `from:"${term}"`),
+    ...fullTextTerms.map((term) => `"${term}"`),
+  ];
+  return `newer_than:${searchDays}d${terms.length ? ` {${discovery.join(" ")}}` : ""}`;
 }
 
 export async function listMessageIds(

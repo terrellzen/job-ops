@@ -85,7 +85,9 @@ const EmailViewerRow: React.FC<EmailViewerRowProps> = ({
   isAppliedJobsLoading,
 }) => {
   const score = item.message.matchConfidence;
-  const isActionable = item.message.processingStatus === "pending_user";
+  const quarantined = item.message.errorCode === "IMAP_MESSAGE_TOO_LARGE";
+  const isActionable =
+    item.message.processingStatus === "pending_user" && !quarantined;
   const embeddedAttempts =
     selectedAppliedJobId === item.message.matchedJobId
       ? item.attempts
@@ -109,7 +111,10 @@ const EmailViewerRow: React.FC<EmailViewerRowProps> = ({
       ? selection.attemptId
       : selectedAppliedJobId === item.message.matchedJobId
         ? item.message.applicationAttemptId ||
-          (attempts.length === 1 ? attempts[0].id : "")
+          (attempts.length === 1 &&
+          item.message.classificationPayload?.explicitSelectionRequired !== true
+            ? attempts[0].id
+            : "")
         : attempts.length === 1
           ? attempts[0].id
           : "";
@@ -120,8 +125,7 @@ const EmailViewerRow: React.FC<EmailViewerRowProps> = ({
   const canStartNew =
     isActionable && !!selectedAppliedJobId && Boolean(attempts[0]?.closedAt);
   const reviewReason = item.message.classificationPayload?.attemptReviewReason;
-  const opportunity =
-    reviewReason === "New opportunity on a closed application";
+  const opportunity = item.reopeningEligible === true;
   const decide = (
     decision: "approve" | "deny" | "link" | "reopen" | "new_attempt",
   ) =>
@@ -159,6 +163,9 @@ const EmailViewerRow: React.FC<EmailViewerRowProps> = ({
         </div>
 
         <p className="truncate text-sm font-medium">{item.message.subject}</p>
+        {quarantined && (
+          <p className="text-xs text-amber-600">{item.message.errorMessage}</p>
+        )}
         {typeof reviewReason === "string" && (
           <p className="text-xs text-amber-600">{reviewReason}</p>
         )}
@@ -177,118 +184,132 @@ const EmailViewerRow: React.FC<EmailViewerRowProps> = ({
         )}
       </div>
 
-      <div className="flex min-w-0 flex-wrap items-center gap-2 lg:ml-auto lg:w-[540px]">
-        <SearchableDropdown
-          value={selectedAppliedJobId}
-          options={appliedJobOptions}
-          onValueChange={onAppliedJobChange}
-          placeholder={isAppliedJobsLoading ? "Loading jobs..." : "Select job"}
-          searchPlaceholder="Search jobs..."
-          emptyText={
-            isAppliedJobsLoading ? "Loading jobs..." : "No jobs found."
-          }
+      {quarantined ? (
+        <Button
+          variant="outline"
           disabled={isActionLoading}
-          triggerClassName="min-w-0 flex-1"
-          contentClassName="w-[360px]"
-          ariaLabel="Select job"
-        />
-
-        {isActionable && selectedAppliedJobId && (
-          <label className="w-full text-xs text-muted-foreground">
-            Application attempt
-            <select
-              className="mt-1 block w-full rounded-md border bg-background p-2 text-sm text-foreground"
-              aria-label="Application attempt"
-              value={selectedAttemptId}
-              onChange={(event) =>
-                setSelection({
-                  jobId: selectedAppliedJobId,
-                  attemptId: event.target.value,
-                })
-              }
-              disabled={isActionLoading}
-            >
-              <option value="">Choose previous or current application…</option>
-              {attempts.map((attempt) => (
-                <option key={attempt.id} value={attempt.id}>
-                  Attempt {attempt.sequence} ·{" "}
-                  {new Date(attempt.appliedAt).toLocaleDateString()} ·{" "}
-                  {attempt.closedAt ? "Closed" : "Active"}
-                  {attempt.applicationReference
-                    ? ` · ${attempt.applicationReference}`
-                    : ""}
-                </option>
-              ))}
-            </select>
-            {attemptsQuery.error && (
-              <span role="alert">
-                Could not load attempts. Refresh to retry.
-              </span>
-            )}
-          </label>
-        )}
-        <span
-          className={`shrink-0 text-xs tabular-nums ${scoreTextClass(score)}`}
+          onClick={() => decide("deny")}
         >
-          {score === null ? "n/a" : `${Math.round(score)}%`}
-        </span>
+          Skip email
+        </Button>
+      ) : (
+        <div className="flex min-w-0 flex-wrap items-center gap-2 lg:ml-auto lg:w-[540px]">
+          <SearchableDropdown
+            value={selectedAppliedJobId}
+            options={appliedJobOptions}
+            onValueChange={onAppliedJobChange}
+            placeholder={
+              isAppliedJobsLoading ? "Loading jobs..." : "Select job"
+            }
+            searchPlaceholder="Search jobs..."
+            emptyText={
+              isAppliedJobsLoading ? "Loading jobs..." : "No jobs found."
+            }
+            disabled={isActionLoading}
+            triggerClassName="min-w-0 flex-1"
+            contentClassName="w-[360px]"
+            ariaLabel="Select job"
+          />
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            aria-label="Confirm email-job match"
-            title="Confirm email-job match"
-            onClick={() => decide("approve")}
-            disabled={isActionLoading || !canDecide}
-            className="h-8 w-8 p-0"
-          >
-            <CheckCircle2 className="h-4 w-4" />
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            title="Link this email to the selected job without changing its current status"
-            onClick={() => decide("link")}
-            disabled={isActionLoading || !canDecide}
-            className="h-8"
-          >
-            {selectedAttempt?.closedAt ? "Keep closed" : "Link only"}
-          </Button>
-          {opportunity &&
-            selectedAttempt?.closedAt &&
-            selectedAttempt.current && (
-              <Button
-                size="sm"
-                disabled={isActionLoading || !canDecide}
-                onClick={() => decide("reopen")}
+          {isActionable && selectedAppliedJobId && (
+            <label className="w-full text-xs text-muted-foreground">
+              Application attempt
+              <select
+                className="mt-1 block w-full rounded-md border bg-background p-2 text-sm text-foreground"
+                aria-label="Application attempt"
+                value={selectedAttemptId}
+                onChange={(event) =>
+                  setSelection({
+                    jobId: selectedAppliedJobId,
+                    attemptId: event.target.value,
+                  })
+                }
+                disabled={isActionLoading}
               >
-                Reopen application
-              </Button>
-            )}
-          {canStartNew && (
+                <option value="">
+                  Choose previous or current application…
+                </option>
+                {attempts.map((attempt) => (
+                  <option key={attempt.id} value={attempt.id}>
+                    Attempt {attempt.sequence} ·{" "}
+                    {new Date(attempt.appliedAt).toLocaleDateString()} ·{" "}
+                    {attempt.closedAt ? "Closed" : "Active"}
+                    {attempt.applicationReference
+                      ? ` · ${attempt.applicationReference}`
+                      : ""}
+                  </option>
+                ))}
+              </select>
+              {attemptsQuery.error && (
+                <span role="alert">
+                  Could not load attempts. Refresh to retry.
+                </span>
+              )}
+            </label>
+          )}
+          <span
+            className={`shrink-0 text-xs tabular-nums ${scoreTextClass(score)}`}
+          >
+            {score === null ? "n/a" : `${Math.round(score)}%`}
+          </span>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              aria-label="Confirm email-job match"
+              title="Confirm email-job match"
+              onClick={() => decide("approve")}
+              disabled={isActionLoading || !canDecide}
+              className="h-8 w-8 p-0"
+            >
+              <CheckCircle2 className="h-4 w-4" />
+            </Button>
             <Button
               size="sm"
               variant="outline"
-              disabled={isActionLoading}
-              title="Start a separate application attempt today and link this email"
-              onClick={() => decide("new_attempt")}
+              title="Link this email to the selected job without changing its current status"
+              onClick={() => decide("link")}
+              disabled={isActionLoading || !canDecide}
+              className="h-8"
             >
-              New application
+              {selectedAttempt?.closedAt ? "Keep closed" : "Link only"}
             </Button>
-          )}
-          <Button
-            size="sm"
-            variant="outline"
-            aria-label="Ignore this match"
-            title="Ignore this match"
-            onClick={() => decide("deny")}
-            disabled={isActionLoading || !isActionable}
-            className="h-8 w-8 p-0"
-          >
-            <XCircle className="h-4 w-4" />
-          </Button>
+            {opportunity &&
+              selectedAttempt?.closedAt &&
+              selectedAttempt.current && (
+                <Button
+                  size="sm"
+                  disabled={isActionLoading || !canDecide}
+                  onClick={() => decide("reopen")}
+                >
+                  Reopen application
+                </Button>
+              )}
+            {canStartNew && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={isActionLoading}
+                title="Start a separate application attempt today and link this email"
+                onClick={() => decide("new_attempt")}
+              >
+                New application
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              aria-label="Ignore this match"
+              title="Ignore this match"
+              onClick={() => decide("deny")}
+              disabled={isActionLoading || !isActionable}
+              className="h-8 w-8 p-0"
+            >
+              <XCircle className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

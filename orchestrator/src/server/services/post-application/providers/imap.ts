@@ -75,6 +75,7 @@ export const imapProvider: PostApplicationProviderAdapter = {
         ...raw,
         uidValidity: undefined,
         lastUid: undefined,
+        searchCheckpoints: undefined,
       });
       encryptImapCredentials(config, args.accountKey); // Fail before network access if encryption is not configured.
       await assertMailboxAvailable(config.email, "imap", args.accountKey);
@@ -86,6 +87,9 @@ export const imapProvider: PostApplicationProviderAdapter = {
           | string
           | undefined;
         config.lastUid = previous.credentials.lastUid as number | undefined;
+        config.searchCheckpoints = parseImapConfig(
+          previous.credentials,
+        ).searchCheckpoints;
       }
       const integration = await upsertConnectedPostApplicationIntegration({
         provider: "imap",

@@ -128,17 +128,21 @@ export function listApplicationAttempts(jobId: string): ApplicationAttempt[] {
         item.applicationAttemptId === row.id &&
         (item.metadata as { eventType?: string } | null)?.eventType !== "note",
     );
+    // The outcome API can close a job without writing a stage event. Current
+    // closure is canonical on the job; archived closure is captured at reapply.
+    const canonicalClosedAt =
+      index === 0
+        ? job.closedAt === null
+          ? null
+          : job.closedAt * 1000
+        : row.closedAtSnapshot;
     const stage =
-      event?.toStage ??
-      (index === 0 && job.closedAt !== null ? "closed" : row.stageSnapshot);
+      canonicalClosedAt !== null
+        ? "closed"
+        : (event?.toStage ?? row.stageSnapshot);
     const closedAt =
-      stage === "closed"
-        ? event
-          ? event.occurredAt * 1000
-          : index === 0 && job.closedAt !== null
-            ? job.closedAt * 1000
-            : (row.closedAtSnapshot ?? 0)
-        : null;
+      canonicalClosedAt ??
+      (stage === "closed" && event ? event.occurredAt * 1000 : null);
     return {
       id: row.id,
       jobId: row.jobId,
@@ -153,7 +157,7 @@ export function listApplicationAttempts(jobId: string): ApplicationAttempt[] {
         index === 0
           ? job.outcome
           : stage === "closed"
-            ? (event?.outcome ?? row.outcomeSnapshot)
+            ? (row.outcomeSnapshot ?? event?.outcome ?? null)
             : (event?.outcome ?? null),
     };
   });

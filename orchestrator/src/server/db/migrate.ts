@@ -1887,6 +1887,13 @@ sqlite.transaction(() => {
       WHERE application_attempt_id IS NULL AND matched_job_id IS NOT NULL
       AND EXISTS (SELECT 1 FROM application_attempts WHERE id = 'initial:' || matched_job_id);
   `);
+  sqlite.exec(`
+    UPDATE application_attempts SET requisition_id = (
+      SELECT source_job_id FROM jobs WHERE jobs.id = application_attempts.job_id
+    ) WHERE sequence = 1 AND requisition_id IS NULL
+      AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id = application_attempts.job_id
+        AND source_job_id IS NOT NULL AND trim(source_job_id) <> '');
+  `);
 })();
 
 sqlite.close();

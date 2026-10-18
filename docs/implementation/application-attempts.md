@@ -29,3 +29,15 @@ Verification so far:
 Review fixes: legacy private-table rebuilds preserve attempt links; stored job ownership is inherited in local mode; legacy closure/outcome snapshots survive starting a new attempt; edits/deletions of historical stage events cannot update the current application; terminal email associations remain immutable during resync. Board and job-page stage displays select the current attempt, and the timeline labels attempts.
 
 Final verification (2026-10-18, Node 22.23.1): all seven required CI-parity checks passed. Full suite: 313 test files passed, 2,218 tests passed, 6 skipped. Documentation production build and `git diff --check` passed. The local database retains 406 jobs and 29 initial attempts with zero foreign-key violations. Development frontend (5173) and backend health (3001) both returned HTTP 200. Live IMAP/Gmail and AI classification were not retested.
+
+## Audit follow-up (2026-10-18)
+
+- Current closure reads the canonical job outcome/closure state, and archived attempts retain that closure when reapplying.
+- Oversized IMAP emails persist metadata-only review notices before advancing the cursor; users inspect the original in their mail client and explicitly skip the notice. No body or attachment is downloaded.
+- IMAP retains manual date/message limits per account for scheduled/default syncs and keeps up to 20 independent keyword/date-window cursors. Legacy cursors are retained, and mailbox changes clear them.
+- Structured explicit-selection requirements are enforced by individual and bulk approval, including ambiguity across separate postings.
+- Gmail keyword-enabled searches retain prior recruitment-sender, recruitment-subject, and scheduling discovery signals. Disabling filtering remains a date-only search.
+- Inbox responses expose structured reopening eligibility; choosing a current closed attempt for an initially unmatched offer exposes reopening, with server validation unchanged.
+- Repeat-safe migration repairs missing initial posting identifiers without overwriting existing references or assigning initial references to later attempts.
+
+Focused validation: 66 tests passed across six files; after preserving the existing no-suggested-match bulk error contract, 35 API/routing tests passed. Final CI-parity verification passed on Node 22.23.1: Biome CI, all four type checks, client production build, and the full suite (313 files; 2,226 tests passed, 6 skipped). Documentation production build and whitespace checks also passed. Local health endpoints returned HTTP 200; the database retains 406 jobs and zero foreign-key violations. Live provider/AI behavior was not retested.

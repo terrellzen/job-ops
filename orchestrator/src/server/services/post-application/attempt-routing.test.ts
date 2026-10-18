@@ -109,6 +109,49 @@ const resolve = (
     isRelevant: true,
   });
 describe.sequential("attempt-aware late email routing", () => {
+  it("honors outcome-only closure despite an existing applied event and preserves it on reapplication", async () => {
+    const created = await job(false);
+    const closedAt = Math.floor((old + 86400000) / 1000);
+    // This is the persistence operation used by PATCH /jobs/:id/outcome.
+    await (await import("@server/repositories/jobs")).updateJob(created.id, {
+      outcome: "withdrawn",
+      closedAt,
+    });
+    expect(repo.listApplicationAttempts(created.id)[0]).toMatchObject({
+      stage: "closed",
+      closedAt: closedAt * 1000,
+      outcome: "withdrawn",
+    });
+    expect(await resolve(created.id, {}, "offer")).toMatchObject({
+      automaticClosedLink: false,
+      attempt: { stage: "closed" },
+    });
+    const routine = await seed(created.id, "rejected");
+    await review.listPostApplicationInbox({
+      provider: "imap",
+      accountKey: "account",
+    });
+    expect(
+      await (await import("@server/repositories/jobs")).getJobById(created.id),
+    ).toMatchObject({
+      closedAt,
+      outcome: "withdrawn",
+    });
+    expect(
+      await (
+        await import("@server/repositories/post-application-messages")
+      ).getPostApplicationMessageById(routine.id),
+    ).toMatchObject({ processingStatus: "auto_linked" });
+    (await import("./application-attempts")).startNewApplicationAttempt(
+      created.id,
+      { appliedAt: Date.now() - 5000 },
+    );
+    expect(repo.listApplicationAttempts(created.id)[1]).toMatchObject({
+      stage: "closed",
+      closedAt: closedAt * 1000,
+      outcome: "withdrawn",
+    });
+  });
   it("automatically links routine mail to a closed attempt without touching closure or outcome", async () => {
     const created = await job();
     const before = await (await import("@server/repositories/jobs")).getJobById(
@@ -307,6 +350,81 @@ describe.sequential("attempt-aware late email routing", () => {
       applicationAttemptId: previous.id,
     });
     expect(repo.listApplicationAttempts(created.id)[0].stage).toBe("applied");
+  });
+  it("requires individual attempt selection for ambiguous sibling postings during bulk approval", async () => {
+    const first = await job(false);
+    await job(false);
+    const message = await seed(first.id, "offer");
+    const items = await review.listPostApplicationInbox({
+      provider: "imap",
+      accountKey: "account",
+    });
+    expect(
+      items[0].message.classificationPayload?.explicitSelectionRequired,
+    ).toBe(true);
+    const result = await review.runPostApplicationInboxAction({
+      provider: "imap",
+      accountKey: "account",
+      action: "approve",
+    });
+    expect(result).toMatchObject({ skipped: 1 });
+    await expect(
+      review.approvePostApplicationInboxItem({
+        messageId: message.id,
+        provider: "imap",
+        accountKey: "account",
+        jobId: first.id,
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(repo.listApplicationAttempts(first.id)[0].stage).toBe("applied");
+    await review.approvePostApplicationInboxItem({
+      messageId: message.id,
+      provider: "imap",
+      accountKey: "account",
+      jobId: first.id,
+      applicationAttemptId: repo.listApplicationAttempts(first.id)[0].id,
+    });
+    expect(repo.listApplicationAttempts(first.id)[0].stage).toBe("offer");
+  });
+  it("keeps oversized-email notices visible until explicitly skipped and never approves them", async () => {
+    const created = await job(false);
+    const message = await seed(created.id);
+    const { eq } = await import("drizzle-orm");
+    await db
+      .update(schema.postApplicationMessages)
+      .set({ errorCode: "IMAP_MESSAGE_TOO_LARGE" })
+      .where(eq(schema.postApplicationMessages.id, message.id));
+    expect(
+      await review.listPostApplicationInbox({
+        provider: "imap",
+        accountKey: "account",
+      }),
+    ).toHaveLength(1);
+    await expect(
+      review.approvePostApplicationInboxItem({
+        messageId: message.id,
+        provider: "imap",
+        accountKey: "account",
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(
+      await review.runPostApplicationInboxAction({
+        provider: "imap",
+        accountKey: "account",
+        action: "approve",
+      }),
+    ).toMatchObject({ skipped: 1 });
+    await review.denyPostApplicationInboxItem({
+      messageId: message.id,
+      provider: "imap",
+      accountKey: "account",
+    });
+    expect(
+      await review.listPostApplicationInbox({
+        provider: "imap",
+        accountKey: "account",
+      }),
+    ).toEqual([]);
   });
   it("does not confuse separate postings with identical company and role names", async () => {
     const first = await job();
