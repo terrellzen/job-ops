@@ -308,6 +308,9 @@ export function updateStageEvent(
       .where(and(stageEventsScopeFilter(), eq(stageEvents.id, eventId)))
       .run();
 
+    // Labels/notes alone never request a status or outcome change.
+    if (!toStage && occurredAt === undefined && !hasOutcome) return;
+
     // Historical attempts must never change the current attempt’s job status.
     const currentAttemptId = ensureInitialApplicationAttempt(
       event.applicationId,
@@ -333,6 +336,14 @@ export function updateStageEvent(
         .where(and(jobsScopeFilter(), eq(jobs.id, event.applicationId)))
         .get();
       if (!job) throw new Error("Job not found");
+
+      if (
+        !hasOutcome &&
+        job.closedAt !== null &&
+        !eventOwnsClosure(event, job) &&
+        !isClosingStage(toStage ?? (lastEvent.toStage as ApplicationStage))
+      )
+        return;
 
       const metadata = parseMetadata(lastEvent.metadata);
       const lastStage = lastEvent.toStage as ApplicationStage;
@@ -375,6 +386,21 @@ export function deleteStageEvent(eventId: string): void {
     const currentAttemptId = ensureInitialApplicationAttempt(
       event.applicationId,
     );
+    if (
+      event.applicationAttemptId &&
+      event.applicationAttemptId !== currentAttemptId
+    )
+      return;
+    const currentJob = tx
+      .select()
+      .from(jobs)
+      .where(and(jobsScopeFilter(), eq(jobs.id, event.applicationId)))
+      .get();
+    if (!currentJob) throw new Error("Job not found");
+    // An outcome-only closure belongs to the job, not to this event. Deleting
+    // unrelated history must not clear it, even if no stage events remain.
+    if (currentJob.closedAt !== null && !eventOwnsClosure(event, currentJob))
+      return;
     const lastEvent = tx
       .select()
       .from(stageEvents)
@@ -612,4 +638,20 @@ function resolveOutcomeAndClosedAt(input: {
     return { outcome, closedAt: input.lastEventOccurredAt };
   }
   return { outcome, closedAt: input.jobClosedAt };
+}
+
+function eventOwnsClosure(
+  event: typeof stageEvents.$inferSelect,
+  job: typeof jobs.$inferSelect,
+): boolean {
+  if (job.closedAt !== event.occurredAt) return false;
+  const outcome =
+    event.outcome ??
+    inferOutcome(
+      event.toStage as ApplicationStage,
+      parseMetadata(event.metadata),
+    );
+  return event.toStage === "closed"
+    ? outcome === job.outcome
+    : outcome !== null && outcome === job.outcome;
 }

@@ -82,7 +82,19 @@ export const imapProvider: PostApplicationProviderAdapter = {
       await withImapConnection(config, async (client) => {
         await client.mailboxOpen(config.mailbox, { readOnly: true });
       });
-      if (sameLogin && previous?.credentials?.mailbox === config.mailbox) {
+      const previousConfig =
+        sameLogin && previous?.credentials
+          ? parseImapConfig(previous.credentials)
+          : null;
+      const sameEndpoint =
+        previousConfig &&
+        previousConfig.host.toLowerCase().replace(/\.$/, "") ===
+          config.host.toLowerCase().replace(/\.$/, "") &&
+        previousConfig.port === config.port &&
+        previousConfig.security === config.security &&
+        previousConfig.username === config.username &&
+        previousConfig.mailbox === config.mailbox;
+      if (sameEndpoint && previous?.credentials) {
         config.uidValidity = previous.credentials.uidValidity as
           | string
           | undefined;

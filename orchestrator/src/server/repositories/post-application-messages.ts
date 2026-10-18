@@ -36,6 +36,7 @@ export type UpsertPostApplicationMessageInput = {
   integrationId: string | null;
   syncRunId: string | null;
   externalMessageId: string;
+  previousExternalMessageId?: string;
   externalThreadId?: string | null;
   fromAddress: string;
   fromDomain?: string | null;
@@ -227,7 +228,14 @@ export async function upsertPostApplicationMessage(
       input.provider,
       input.accountKey,
       input.externalMessageId,
-    ));
+    )) ??
+    (input.previousExternalMessageId
+      ? await getPostApplicationMessageByExternalId(
+          input.provider,
+          input.accountKey,
+          input.previousExternalMessageId,
+        )
+      : null);
 
   if (existing) {
     const nextProcessingStatus = isTerminalProcessingStatus(
@@ -242,6 +250,10 @@ export async function upsertPostApplicationMessage(
     await db
       .update(postApplicationMessages)
       .set({
+        // Promote legacy provider identity without discarding its row or decision.
+        externalMessageId: input.previousExternalMessageId
+          ? input.externalMessageId
+          : existing.externalMessageId,
         applicationAttemptId: isTerminalProcessingStatus(
           existing.processingStatus,
         )

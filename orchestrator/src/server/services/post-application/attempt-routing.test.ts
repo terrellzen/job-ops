@@ -506,6 +506,34 @@ describe.sequential("attempt-aware late email routing", () => {
       closedAt: null,
     });
   });
+  it("preserves outcome-only closure during historical deletion and metadata edits", async () => {
+    const created = await job();
+    const historical = await tracking.getStageEvents(created.id);
+    (await import("./application-attempts")).startNewApplicationAttempt(
+      created.id,
+      { appliedAt: Date.now() - 5000 },
+    );
+    const jobs = await import("@server/repositories/jobs");
+    await jobs.updateJob(created.id, {
+      outcome: "rejected",
+      closedAt: Math.floor(Date.now() / 1000),
+    });
+    const before = await jobs.getJobById(created.id);
+    tracking.deleteStageEvent(historical[0].id);
+    expect(await jobs.getJobById(created.id)).toEqual(before);
+    const current = (await tracking.getStageEvents(created.id)).find(
+      (event) => event.attemptSequence === 2,
+    );
+    if (!current) throw new Error("Missing current event");
+    tracking.updateStageEvent(current.id, {
+      metadata: { actor: "user", eventLabel: "Corrected label" },
+    });
+    expect(await jobs.getJobById(created.id)).toEqual(before);
+    // Even deleting the last current non-closing event cannot erase an
+    // independent closure recorded through the outcome endpoint.
+    tracking.deleteStageEvent(current.id);
+    expect(await jobs.getJobById(created.id)).toEqual(before);
+  });
   it("does not reopen an old attempt after a later reapplication exists", async () => {
     const created = await job();
     const oldAttempt = repo.listApplicationAttempts(created.id)[0];

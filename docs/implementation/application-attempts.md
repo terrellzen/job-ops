@@ -41,3 +41,12 @@ Final verification (2026-10-18, Node 22.23.1): all seven required CI-parity chec
 - Repeat-safe migration repairs missing initial posting identifiers without overwriting existing references or assigning initial references to later attempts.
 
 Focused validation: 66 tests passed across six files; after preserving the existing no-suggested-match bulk error contract, 35 API/routing tests passed. Final CI-parity verification passed on Node 22.23.1: Biome CI, all four type checks, client production build, and the full suite (313 files; 2,226 tests passed, 6 skipped). Documentation production build and whitespace checks also passed. Local health endpoints returned HTTP 200; the database retains 406 jobs and zero foreign-key violations. Live provider/AI behavior was not retested.
+
+## Second audit follow-up (2026-10-18)
+
+- Historical event deletion returns after removing the event, without recomputing the current application. Metadata-only edits preserve job state; unrelated event changes/deletions cannot discard independent outcome-only closure.
+- Cursor restoration requires the same normalized host, port, transport security, username and mailbox, with the existing authentication-method check retained.
+- Oversized notices use the envelope RFC Message-ID when available. Rescans preserve terminal decisions; old location-based notices are promoted within the same scoped account without replacing their row or dismissal. Missing historical Message-IDs cannot be reconstructed reliably after a move/UID reset.
+- Added real encrypted-repository/SQLite coverage with only the IMAP network boundary mocked, including endpoint changes, persisted dismissal across resets/moves, legacy promotion, and tenant/user/account isolation. All fixtures use isolated temporary databases.
+
+Verification on Node 22.23.1: all seven required CI-parity checks passed. Full suite: 314 files passed, 2,238 tests passed, 6 skipped. Documentation build and whitespace checks passed. Focused checks included 11 real-persistence IMAP cases and the tracking/approval regressions. The active database retains 406 jobs and zero foreign-key violations; live email providers were not contacted by the tests.

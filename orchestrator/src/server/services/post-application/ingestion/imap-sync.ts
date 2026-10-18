@@ -214,7 +214,8 @@ export async function runImapSync(
               accountKey,
               integrationId: integration.id,
               syncRunId: run.id,
-              externalMessageId: `oversized:${imapMessageIdentity(config.mailbox, validity, uid)}`,
+              externalMessageId: `oversized:${imapMessageIdentity(config.mailbox, validity, uid, metadata.envelope?.messageId)}`,
+              previousExternalMessageId: `oversized:${imapMessageIdentity(config.mailbox, validity, uid)}`,
               fromAddress: metadata.envelope?.from?.[0]?.address ?? "",
               subject:
                 metadata.envelope?.subject ??
