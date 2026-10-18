@@ -39,6 +39,7 @@ import type {
   PostApplicationRouterStageTarget,
   PostApplicationSyncRun,
 } from "@shared/types";
+import { isLifecycleEvent } from "@shared/utils/application-attempts";
 import { and, desc, eq, sql } from "drizzle-orm";
 import {
   bindConfirmedMessage,
@@ -290,11 +291,7 @@ export async function approvePostApplicationInboxItem(args: {
       )
       .orderBy(desc(schema.stageEvents.occurredAt))
       .all()
-      .find(
-        (event) =>
-          (event.metadata as { eventType?: string } | null)?.eventType !==
-          "note",
-      );
+      .find(isLifecycleEvent);
     if (
       !args.reopen &&
       !args.newAttempt &&

@@ -569,6 +569,101 @@ describe.sequential("attempt-aware late email routing", () => {
     );
     vi.doUnmock("@client/api");
   });
+  it("closing-event label edits cannot claim a later independent closure", async () => {
+    const created = await job();
+    const closed = (await tracking.getStageEvents(created.id)).find(
+      (event) => event.toStage === "closed",
+    );
+    if (!closed) throw new Error("Missing closure");
+    const jobs = await import("@server/repositories/jobs");
+    await jobs.updateJob(created.id, {
+      outcome: "rejected",
+      closedAt: Math.floor(Date.now() / 1000),
+    });
+    const before = await jobs.getJobById(created.id);
+    vi.doMock("@client/api", () => ({
+      updateJobStageEvent: async (
+        _job: string,
+        id: string,
+        payload: Parameters<typeof tracking.updateStageEvent>[1],
+      ) => tracking.updateStageEvent(id, payload),
+    }));
+    const { logJobStageEvent } = await import("@client/lib/logJobStageEvent");
+    await logJobStageEvent({
+      jobId: created.id,
+      currentStage: "closed",
+      eventId: closed.id,
+      values: {
+        stage: "closed",
+        title: "Corrected closing label",
+        date: new Date(closed.occurredAt * 1000).toISOString(),
+        notes: "Label only",
+      },
+    });
+    expect(
+      (await tracking.getStageEvents(created.id)).find(
+        (event) => event.id === closed.id,
+      ),
+    ).toMatchObject({ title: "Corrected closing label", outcome: "withdrawn" });
+    expect(await jobs.getJobById(created.id)).toEqual(before);
+    // Even an explicit history correction cannot acquire independent current state.
+    tracking.updateStageEvent(closed.id, {
+      toStage: "closed",
+      outcome: null,
+      occurredAt: closed.occurredAt,
+    });
+    expect(await jobs.getJobById(created.id)).toEqual(before);
+    expect(
+      repo.getScopedAttempt(repo.listApplicationAttempts(created.id)[0].id)
+        ?.closureEventId,
+    ).toBeNull();
+    tracking.deleteStageEvent(closed.id);
+    expect(await jobs.getJobById(created.id)).toEqual(before);
+  });
+  it.each([
+    null,
+    "rejected" as const,
+  ])("notes never recreate a deleted closure, including notes carrying outcome %s", async (noteOutcome) => {
+    const created = await job();
+    const closure = (await tracking.getStageEvents(created.id)).find(
+      (event) => event.toStage === "closed",
+    );
+    if (!closure) throw new Error("Missing closure");
+    const note = tracking.transitionStage(
+      created.id,
+      "no_change",
+      closure.occurredAt + 100,
+      { actor: "user", eventType: "note", note: "Follow-up" },
+      noteOutcome,
+    );
+    tracking.deleteStageEvent(closure.id);
+    const jobs = await import("@server/repositories/jobs");
+    expect(await jobs.getJobById(created.id)).toMatchObject({
+      status: "applied",
+      outcome: null,
+      closedAt: null,
+    });
+    expect(repo.listApplicationAttempts(created.id)[0]).toMatchObject({
+      stage: "applied",
+      outcome: null,
+      closedAt: null,
+    });
+    expect(
+      repo.getScopedAttempt(repo.listApplicationAttempts(created.id)[0].id)
+        ?.closureEventId,
+    ).toBeNull();
+    const applied = (await tracking.getStageEvents(created.id)).find(
+      (event) => event.toStage === "applied",
+    );
+    if (!applied) throw new Error("Missing applied event");
+    tracking.updateStageEvent(applied.id, { toStage: "technical_interview" });
+    expect(repo.listApplicationAttempts(created.id)[0].stage).toBe(
+      "technical_interview",
+    );
+    const before = await jobs.getJobById(created.id);
+    tracking.deleteStageEvent(note.id);
+    expect(await jobs.getJobById(created.id)).toEqual(before);
+  });
   it("deletes a genuine generic closure with the UI reason code and null outcome", async () => {
     const created = await job(false);
     const event = tracking.transitionStage(

@@ -61,3 +61,12 @@ Verification on Node 22.23.1: all seven required CI-parity checks passed. Full s
 - Local database backup preceded migration. All 406 job status/outcome/applied/closure fields were unchanged afterward, with zero foreign-key violations.
 
 Final verification on Node 22.23.1: all seven CI-parity checks passed; 314 test files passed, 2,242 tests passed, 6 skipped. Documentation production build, local backend health, and whitespace checks passed. Focused lifecycle/IMAP tests passed (62 tests), followed by migration/client-payload/endpoint boundary coverage (44 tests). Live providers and container deployment were not exercised.
+
+## Closing-event edits and notes follow-up (2026-10-18)
+
+- Generic Closed edits no longer submit a synthetic null outcome. The editor initializes rejected/withdrawn events with their outcome and initializes notes as notes.
+- Editing history cannot acquire an independent current closure, regardless of submitted stage/outcome differences. Current-state changes remain explicit through outcome/status/reopen actions.
+- A shared lifecycle predicate excludes notes in tracking, attempt display, email chronology, and client current-stage selection. Edit/delete recomputation is centralized; notes remain visible in history and cannot become the source of a closure.
+- Regressions use the actual client formatter and real SQLite for closing-label edits, explicit history corrections, deletion with later notes (including a note carrying an outcome), subsequent stage edits, and note deletion. Focused suite: 51 tests passed.
+
+Final verification on Node 22.23.1: all seven CI-parity checks passed. Full suite: 314 files passed, 2,246 tests passed, 6 skipped. Documentation production build and whitespace checks passed. No migration was required; live providers and container deployment were not exercised.

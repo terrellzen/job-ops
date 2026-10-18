@@ -17,6 +17,7 @@ import type {
   PostApplicationProvider,
   PostApplicationRouterStageTarget,
 } from "@shared/types";
+import { isLifecycleEvent } from "@shared/utils/application-attempts";
 import { and, eq } from "drizzle-orm";
 
 export function extractApplicationIdentifiers(
@@ -254,10 +255,7 @@ export async function resolveEmailAttempt(args: {
       ),
     )
     .all()
-    .filter(
-      (event) =>
-        (event.metadata as { eventType?: string } | null)?.eventType !== "note",
-    )
+    .filter(isLifecycleEvent)
     .sort((a, b) => b.occurredAt - a.occurredAt)[0];
   const predatesLatest = Boolean(
     latestEvent && args.receivedAt <= latestEvent.occurredAt * 1000,

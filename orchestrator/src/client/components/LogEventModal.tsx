@@ -1,6 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { StageEvent } from "@shared/types.js";
 import { STAGE_LABELS } from "@shared/types.js";
+import { isLifecycleEvent } from "@shared/utils/application-attempts";
 import React from "react";
 import { Controller, useForm } from "react-hook-form";
 import * as z from "zod";
@@ -100,7 +101,13 @@ export const LogEventModal: React.FC<LogEventModalProps> = ({
     if (isOpen) {
       if (editingEvent) {
         reset({
-          stage: editingEvent.toStage,
+          stage: !isLifecycleEvent(editingEvent)
+            ? "no_change"
+            : editingEvent.toStage === "closed" &&
+                (editingEvent.outcome === "rejected" ||
+                  editingEvent.outcome === "withdrawn")
+              ? editingEvent.outcome
+              : editingEvent.toStage,
           title: editingEvent.metadata?.eventLabel || "",
           date: toDateTimeLocal(new Date(editingEvent.occurredAt * 1000)),
           notes: editingEvent.metadata?.note || "",

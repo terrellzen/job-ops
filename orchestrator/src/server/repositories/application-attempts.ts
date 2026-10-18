@@ -6,6 +6,7 @@ import type {
   ApplicationAttempt,
   PostApplicationProvider,
 } from "@shared/types";
+import { isLifecycleEvent } from "@shared/utils/application-attempts";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
 const {
@@ -124,9 +125,7 @@ export function listApplicationAttempts(jobId: string): ApplicationAttempt[] {
     .all();
   return rows.map((row, index) => {
     const event = events.find(
-      (item) =>
-        item.applicationAttemptId === row.id &&
-        (item.metadata as { eventType?: string } | null)?.eventType !== "note",
+      (item) => item.applicationAttemptId === row.id && isLifecycleEvent(item),
     );
     // The outcome API can close a job without writing a stage event. Current
     // closure is canonical on the job; archived closure is captured at reapply.

@@ -15,7 +15,8 @@ import type {
   StageEvent,
   StageEventMetadata,
 } from "@shared/types";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { isLifecycleEvent } from "@shared/utils/application-attempts";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "../db/index";
 import {
@@ -192,9 +193,9 @@ export function transitionStage(
           eq(stageEvents.applicationAttemptId, applicationAttemptId),
         ),
       )
-      .orderBy(desc(stageEvents.occurredAt))
-      .limit(1)
-      .get();
+      .orderBy(desc(stageEvents.occurredAt), sql`stage_events.rowid DESC`)
+      .all()
+      .find(isLifecycleEvent);
 
     const fromStage =
       (lastEvent?.toStage as ApplicationStage | undefined) ?? null;
@@ -236,7 +237,7 @@ export function transitionStage(
       }
     }
 
-    if (outcome) {
+    if (outcome && !isNoteEvent) {
       updates.outcome = outcome;
       updates.closedAt = timestamp;
     }
@@ -292,6 +293,21 @@ export function updateStageEvent(
       .get();
     if (!event) throw new Error("Event not found");
 
+    const currentAttemptId = ensureInitialApplicationAttempt(
+      event.applicationId,
+    );
+    const priorLatest = tx
+      .select()
+      .from(stageEvents)
+      .where(
+        and(
+          stageEventsScopeFilter(),
+          eq(stageEvents.applicationAttemptId, currentAttemptId),
+        ),
+      )
+      .orderBy(desc(stageEvents.occurredAt), sql`stage_events.rowid DESC`)
+      .all()
+      .find(isLifecycleEvent);
     const updates: Partial<typeof stageEvents.$inferInsert> = {};
     if (toStage) updates.toStage = toStage;
     if (occurredAt) updates.occurredAt = occurredAt;
@@ -318,12 +334,26 @@ export function updateStageEvent(
       occurredAt !== undefined && occurredAt !== event.occurredAt;
     const outcomeChanged =
       hasOutcome && (outcome ?? null) !== (event.outcome ?? null);
-    if (!stageChanged && !dateChanged && !outcomeChanged) return;
+    const lifecycleTypeChanged =
+      isLifecycleEvent(event) !==
+      isLifecycleEvent({
+        metadata:
+          parsedMetadata === undefined ? event.metadata : parsedMetadata,
+      });
+    if (
+      !stageChanged &&
+      !dateChanged &&
+      !outcomeChanged &&
+      !lifecycleTypeChanged
+    )
+      return;
 
     // Historical attempts must never change the current attempt’s job status.
-    const currentAttemptId = ensureInitialApplicationAttempt(
-      event.applicationId,
-    );
+    if (
+      event.applicationAttemptId &&
+      event.applicationAttemptId !== currentAttemptId
+    )
+      return;
     const lastEvent = tx
       .select()
       .from(stageEvents)
@@ -334,11 +364,11 @@ export function updateStageEvent(
           eq(stageEvents.applicationAttemptId, currentAttemptId),
         ),
       )
-      .orderBy(desc(stageEvents.occurredAt))
-      .limit(1)
-      .get();
+      .orderBy(desc(stageEvents.occurredAt), sql`stage_events.rowid DESC`)
+      .all()
+      .find(isLifecycleEvent);
 
-    if (lastEvent && lastEvent.id === eventId) {
+    if (lastEvent?.id === eventId || priorLatest?.id === eventId) {
       const job = tx
         .select()
         .from(jobs)
@@ -348,36 +378,11 @@ export function updateStageEvent(
 
       if (
         job.closedAt !== null &&
-        getScopedAttempt(currentAttemptId)?.closureEventId !== event.id &&
-        !outcomeChanged &&
-        !(stageChanged && toStage === "closed")
+        getScopedAttempt(currentAttemptId)?.closureEventId !== event.id
       )
         return;
 
-      const metadata = parseMetadata(lastEvent.metadata);
-      const lastStage = lastEvent.toStage as ApplicationStage;
-      const { outcome, closedAt } = resolveOutcomeAndClosedAt({
-        lastStage,
-        lastEventOccurredAt: lastEvent.occurredAt,
-        metadata,
-        lastEventOutcome: (lastEvent.outcome as JobOutcome | null) ?? null,
-        jobOutcome: (job.outcome as JobOutcome | null) ?? null,
-        jobClosedAt: job.closedAt ?? null,
-      });
-
-      tx.update(jobs)
-        .set({
-          status: STAGE_TO_STATUS[lastStage],
-          outcome,
-          closedAt,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(and(jobsScopeFilter(), eq(jobs.id, event.applicationId)))
-        .run();
-      setCurrentAttemptClosureEvent(
-        event.applicationId,
-        closedAt !== null ? lastEvent.id : null,
-      );
+      recomputeLifecycle(event.applicationId, currentAttemptId);
     }
   });
 }
@@ -394,6 +399,8 @@ export function deleteStageEvent(eventId: string): void {
     tx.delete(stageEvents)
       .where(and(stageEventsScopeFilter(), eq(stageEvents.id, eventId)))
       .run();
+
+    if (!isLifecycleEvent(event)) return;
 
     // Recompute using the current attempt only.
     const currentAttemptId = ensureInitialApplicationAttempt(
@@ -417,67 +424,7 @@ export function deleteStageEvent(eventId: string): void {
       getScopedAttempt(currentAttemptId)?.closureEventId !== event.id
     )
       return;
-    const lastEvent = tx
-      .select()
-      .from(stageEvents)
-      .where(
-        and(
-          stageEventsScopeFilter(),
-          eq(stageEvents.applicationId, event.applicationId),
-          eq(stageEvents.applicationAttemptId, currentAttemptId),
-        ),
-      )
-      .orderBy(desc(stageEvents.occurredAt))
-      .limit(1)
-      .get();
-
-    if (lastEvent) {
-      const job = tx
-        .select()
-        .from(jobs)
-        .where(and(jobsScopeFilter(), eq(jobs.id, event.applicationId)))
-        .get();
-      if (!job) throw new Error("Job not found");
-
-      const metadata = parseMetadata(lastEvent.metadata);
-      const lastStage = lastEvent.toStage as ApplicationStage;
-      const { outcome, closedAt } = resolveOutcomeAndClosedAt({
-        lastStage,
-        lastEventOccurredAt: lastEvent.occurredAt,
-        metadata,
-        lastEventOutcome: (lastEvent.outcome as JobOutcome | null) ?? null,
-        jobOutcome: (job.outcome as JobOutcome | null) ?? null,
-        jobClosedAt: job.closedAt ?? null,
-      });
-
-      tx.update(jobs)
-        .set({
-          status: STAGE_TO_STATUS[lastStage],
-          outcome,
-          closedAt,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(and(jobsScopeFilter(), eq(jobs.id, event.applicationId)))
-        .run();
-      setCurrentAttemptClosureEvent(
-        event.applicationId,
-        closedAt !== null ? lastEvent.id : null,
-      );
-    } else {
-      // If no events left, maybe revert to discovered?
-      // For now just keep it as is or set to discovered if it was applied
-      tx.update(jobs)
-        .set({
-          status: "discovered",
-          appliedAt: null,
-          outcome: null,
-          closedAt: null,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(and(jobsScopeFilter(), eq(jobs.id, event.applicationId)))
-        .run();
-      setCurrentAttemptClosureEvent(event.applicationId, null);
-    }
+    recomputeLifecycle(event.applicationId, currentAttemptId);
   });
 }
 
@@ -631,29 +578,42 @@ function isClosingStage(toStage: ApplicationStage): boolean {
   return toStage === "closed" || toStage === "offer";
 }
 
-function resolveOutcomeAndClosedAt(input: {
-  lastStage: ApplicationStage;
-  lastEventOccurredAt: number;
-  metadata: StageEventMetadata | null;
-  lastEventOutcome: JobOutcome | null;
-  jobOutcome: JobOutcome | null;
-  jobClosedAt: number | null;
-}): { outcome: JobOutcome | null; closedAt: number | null } {
-  const inferredOutcome = inferOutcome(input.lastStage);
-  const closingStage = isClosingStage(input.lastStage);
-  const outcome =
-    input.lastEventOutcome ??
-    inferredOutcome ??
-    (closingStage ? input.jobOutcome : null);
-
-  if (input.lastStage === "closed") {
-    return { outcome, closedAt: input.lastEventOccurredAt };
-  }
-  if (!outcome) {
-    return { outcome, closedAt: null };
-  }
-  if (input.lastEventOutcome || inferredOutcome) {
-    return { outcome, closedAt: input.lastEventOccurredAt };
-  }
-  return { outcome, closedAt: input.jobClosedAt };
+// Called only inside the edit/delete transaction, after ownership checks.
+function recomputeLifecycle(applicationId: string, attemptId: string): void {
+  const latest = db
+    .select()
+    .from(stageEvents)
+    .where(
+      and(
+        stageEventsScopeFilter(),
+        eq(stageEvents.applicationId, applicationId),
+        eq(stageEvents.applicationAttemptId, attemptId),
+      ),
+    )
+    .orderBy(desc(stageEvents.occurredAt), sql`stage_events.rowid DESC`)
+    .all()
+    .find(isLifecycleEvent);
+  const stage = latest?.toStage as ApplicationStage | undefined;
+  const outcome = latest
+    ? ((latest.outcome as JobOutcome | null) ??
+      inferOutcome(stage as ApplicationStage))
+    : null;
+  const closedAt =
+    latest && (stage === "closed" || outcome !== null)
+      ? latest.occurredAt
+      : null;
+  db.update(jobs)
+    .set({
+      status: stage ? STAGE_TO_STATUS[stage] : "discovered",
+      ...(latest ? {} : { appliedAt: null }),
+      outcome,
+      closedAt,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(and(jobsScopeFilter(), eq(jobs.id, applicationId)))
+    .run();
+  setCurrentAttemptClosureEvent(
+    applicationId,
+    closedAt !== null ? (latest?.id ?? null) : null,
+  );
 }

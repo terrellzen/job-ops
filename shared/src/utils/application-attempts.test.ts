@@ -25,4 +25,16 @@ describe("current application attempt events", () => {
     expect(currentAttemptEvents([legacy])).toEqual([legacy]);
     expect(currentAttemptEvents([])).toEqual([]);
   });
+  it("excludes notes from lifecycle display without falling back to a previous attempt", () => {
+    const current = event(2, 10);
+    const note = {
+      ...event(2, 20),
+      metadata: { eventType: "note" as const },
+      toStage: "closed",
+    };
+    expect(currentAttemptEvents([event(1, 30), current, note])).toEqual([
+      current,
+    ]);
+    expect(currentAttemptEvents([event(1, 30), note])).toEqual([]);
+  });
 });

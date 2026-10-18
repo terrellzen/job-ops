@@ -71,7 +71,8 @@ export async function logJobStageEvent({
       toStage: toStage === "no_change" ? undefined : toStage,
       occurredAt: toTimestamp(values.date) ?? undefined,
       metadata,
-      outcome,
+      // Generic Closed does not explicitly change an existing outcome.
+      ...(values.stage === "closed" ? {} : { outcome }),
     });
     return { effectiveStage, newEvent: null };
   }

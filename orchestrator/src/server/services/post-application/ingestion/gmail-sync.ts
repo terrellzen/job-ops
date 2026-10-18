@@ -24,6 +24,7 @@ import { resolveStageTransitionForTarget } from "@server/services/post-applicati
 import { privateDataScopeFilter } from "@server/tenancy/private-scope";
 import { resolveEmailKeywords } from "@shared/email-keywords";
 import type { PostApplicationRouterStageTarget } from "@shared/types";
+import { isLifecycleEvent } from "@shared/utils/application-attempts";
 import { and, eq } from "drizzle-orm";
 import {
   bindConfirmedMessage,
@@ -180,8 +181,7 @@ async function createAutoStageEvent(args: {
         .some(
           (event) =>
             event.occurredAt * 1000 >= args.receivedAt &&
-            (event.metadata as { eventType?: string } | null)?.eventType !==
-              "note",
+            isLifecycleEvent(event),
         );
       if (newer) return;
     }
